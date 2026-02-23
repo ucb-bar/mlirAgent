@@ -197,6 +197,8 @@ def main():
             max_metric_calls=args.max_evals,
             parallel=False,
             run_dir=run_dir,
+            use_cloudpickle=False,
+            raise_on_exception=False,
         ),
         reflection=ReflectionConfig(
             reflection_lm=lm,
