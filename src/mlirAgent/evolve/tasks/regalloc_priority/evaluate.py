@@ -24,18 +24,23 @@ from pathlib import Path
 
 try:
     from ..llvm_bench import (
-        EvalConfig, build_llvm, eval_benchmarks, extract_hyperparams,
-        find_benchmarks, load_baseline, optuna_tune, patch_source,
-        restore_source,
+        EvalConfig, ScoreFormula, build_llvm, eval_benchmarks,
+        extract_hyperparams, find_benchmarks, generate_asi, load_baseline,
+        load_baseline_stats, optuna_tune, patch_source, restore_source,
     )
 except ImportError:
     # Standalone loading by OpenEvolve's importlib (no parent package)
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from llvm_bench import (
-        EvalConfig, build_llvm, eval_benchmarks, extract_hyperparams,
-        find_benchmarks, load_baseline, optuna_tune, patch_source,
-        restore_source,
+        EvalConfig, ScoreFormula, build_llvm, eval_benchmarks,
+        extract_hyperparams, find_benchmarks, generate_asi, load_baseline,
+        load_baseline_stats, optuna_tune, patch_source, restore_source,
     )
+
+try:
+    from openevolve.evaluation_result import EvaluationResult
+except ImportError:
+    EvaluationResult = None
 
 _EVAL_DIR = Path(__file__).resolve().parent
 
@@ -138,6 +143,8 @@ def evaluate(program_path: str, config: EvalConfig = None) -> dict:
                 config.data_dir, _score,
                 evolved_llc_flags=evolved_llc_flags,
                 opt_timeout=config.opt_timeout,
+                enable_stats=config.enable_stats,
+                enable_perf=config.enable_perf_counters,
             )
 
         result["combined_score"] = score
@@ -155,6 +162,22 @@ def evaluate(program_path: str, config: EvalConfig = None) -> dict:
             )
         if ev["errors"]:
             result["error"] = "; ".join(ev["errors"])
+
+        # Generate ASI (Actionable Side Information)
+        baseline_stats = None
+        if config.enable_stats:
+            baseline_stats = load_baseline_stats(config)
+        asi = generate_asi(
+            score, ev, baseline, baseline_stats=baseline_stats,
+            formula=ScoreFormula(
+                speedup_weight=5.0,
+                binary_weight=1.0,
+                description="5 x speedup% + binary_reduction%",
+            ),
+        )
+
+        if EvaluationResult is not None:
+            return EvaluationResult(metrics=result, artifacts={"asi": asi})
 
     except subprocess.TimeoutExpired:
         result["error"] = "Build timed out (600s)"
