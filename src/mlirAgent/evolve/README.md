@@ -210,6 +210,135 @@ Each benchmark is run **5 times** and the **median** wall-clock time is used
 scheduling and process startup, though very short benchmarks (sqlite3 at 2ms)
 remain unreliable.
 
+## ASI — Actionable Side Information
+
+ASI is a structured diagnostic feedback mechanism inspired by GEPA's "text
+gradients". Instead of returning only a scalar score to the LLM, the evaluator
+generates a multi-tier markdown narrative explaining *why* the code scored as it
+did and *what to change*.
+
+### Tiers
+
+| Tier | Content | Overhead | Config |
+|------|---------|----------|--------|
+| **1** | Score decomposition + per-benchmark signal classification | Zero | Always on |
+| **2** | Compiler statistics delta (`-stats` output vs baseline) | Zero | `EVOLVE_ENABLE_STATS=1` (default) |
+| **3** | Runtime variance (CoV from 5 runs, STABLE/MODERATE/NOISY) | Zero | Always on |
+| **4** | Hardware perf counters (instructions, cycles, cache/branch misses) | ~1s | `EVOLVE_ENABLE_PERF=1` |
+| **5** | Optimization decision changes (`-pass-remarks-output` YAML diff) | ~20% | `EVOLVE_ENABLE_REMARKS=1` |
+
+### Tier 1: Score Decomposition
+
+Breaks the score into its components (speedup vs binary reduction) and
+classifies each benchmark's signal reliability:
+
+- **UNRELIABLE (<10ms)** — baseline runtime too short (e.g., sqlite3 at 2ms)
+- **HIGH_VARIANCE (<100ms)** — borderline runtime stability
+- **REAL (code changed)** — text section changed AND meaningful speedup
+- **NOISE (same code)** — speedup without code change (measurement artifact)
+- **MARGINAL** — small or no change
+
+### Tier 2: Compiler Statistics Delta
+
+Compares LLVM `-stats` output between evolved and baseline compilations. Shows
+which optimization passes changed behavior (e.g., "inline - Number of functions
+inlined: 1234 → 1567, +27%").
+
+### Tier 5: Optimization Decision Changes
+
+Compares per-decision optimization remarks (YAML) between evolved and baseline.
+Identifies "flipped" decisions — functions that changed from inlined→rejected
+or rejected→inlined — with their cost/threshold values. This gives the LLM
+precise targets: "function X was rejected because cost=500 exceeds threshold=225;
+lower the cost or raise the threshold."
+
+The remarks parser uses a line-by-line state machine (not PyYAML) for
+performance on 62MB files. Only `inline` and `loop-unroll` pass remarks are
+extracted.
+
+### Example ASI Output
+
+```markdown
+## Performance Analysis (Score: 8.78)
+
+### Score Decomposition
+Formula: binary_reduction% + (avg_speedup - 1) x 10
+- Avg speedup: 1.0023x (+0.23%) x 0.1 = 0.02
+- Binary reduction: 9.24% x 1.0 = 9.24
+
+### Per-Benchmark Results
+| Benchmark | Speedup | Text D | Binary D | Baseline RT | Signal |
+|-----------|---------|--------|----------|-------------|--------|
+| spass     | +0.3%   | +12.31%| +10.42%  | 8.1s        | REAL   |
+| tramp3d-v4| -1.2%   | -3.45% | -2.11%   | 0.11s       | HIGH_VARIANCE |
+
+### Optimization Decisions
+**spass** (412 decisions changed vs baseline):
+- 287 newly passed (were rejected)
+- 125 newly rejected (were passed)
+
+| Function | Callee | Direction | BL Cost/Thresh | Ev Cost/Thresh |
+|----------|--------|-----------|----------------|----------------|
+| memory_Free | allocBlock | now passed | 500/225 | -15025/225 |
+```
+
+## GEPA Integration
+
+[GEPA](https://github.com/google-deepmind/gepa) (Generalist Evolutionary
+Prompt Architect) is an optimization framework that uses LLM reflections to
+evolve arbitrary text parameters. We integrate GEPA as an alternative to
+OpenEvolve for driving LLVM heuristic evolution.
+
+### Architecture
+
+```
+GEPA optimize_anything()
+  │
+  ├─ evaluator(code_str) → (score, {"Feedback": ASI_markdown})
+  │    └─ Our make_evaluator(): patch LLVM, build, benchmark, generate ASI
+  │
+  └─ reflection_lm(prompt) → str
+       └─ ManualLM: write prompt to disk, poll for response file
+```
+
+Key insight: GEPA's evaluator protocol accepts `(score, side_info_dict)` tuples.
+We pass our ASI as `{"Feedback": asi_text}`, which GEPA includes in its
+reflection prompt alongside the candidate code. This gives the LLM rich
+diagnostic context for proposing improvements.
+
+### Usage
+
+```bash
+# Manual mode: prompts appear as prompt_NNN.md, you write prompt_NNN.response.md
+python gepa_run.py --task llvm_inlining --max-evals 10
+
+# Auto mode for smoke testing (auto-responds with trivially modified code)
+python gepa_run.py --task llvm_inlining --max-evals 2 --auto-respond
+```
+
+### Configuration
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--task` | (required) | `llvm_inlining`, `loop_unrolling`, or `regalloc_priority` |
+| `--max-evals` | 10 | Maximum evaluator calls (seed + proposals) |
+| `--prompts-dir` | `gepa_prompts` | Directory for prompt/response files |
+| `--output-dir` | `<prompts-dir>/run` | GEPA state directory (for resume) |
+| `--auto-respond` | off | Spawn background thread that auto-creates responses |
+
+### GEPA vs OpenEvolve
+
+| Feature | OpenEvolve | GEPA |
+|---------|-----------|------|
+| Population | MAP-Elites (50 candidates) | Pareto frontier |
+| Feedback | Scalar score only → ASI via artifacts | Native side-info channel |
+| LLM interface | ManualLLM (file-based) | ManualLM (file-based) |
+| Hyperparameter tuning | Optuna inner-loop | Not integrated (future) |
+| Resume | Checkpoint directory | `run_dir` state |
+
+Both frameworks use our same evaluation pipeline (`llvm_bench.py`), so scores
+are directly comparable.
+
 ## LLVM Hooks
 
 ### Inlining (`-use-evolved-inline-cost`)
@@ -291,14 +420,20 @@ config = EvalConfig.from_env(
 | `EVOLVE_BUILD_DIR` | (required) | LLVM ninja build directory |
 | `EVOLVE_OPT_TIMEOUT` | 120 | Per-benchmark opt/llc timeout (seconds) |
 | `EVOLVE_OPTUNA_TRIALS` | 20 | Optuna trials (0 = disable) |
+| `EVOLVE_ENABLE_STATS` | 1 | Tier 2: collect `-stats` output |
+| `EVOLVE_ENABLE_PERF` | 0 | Tier 4: collect perf counters |
+| `EVOLVE_ENABLE_REMARKS` | 0 | Tier 5: collect optimization remarks (~20% overhead) |
 
 ## Task Structure
 
 ```
 src/mlirAgent/evolve/
-  manual_run.py                  # Orchestrator: --auto/--wait/--resume
+  manual_run.py                  # OpenEvolve orchestrator: --auto/--wait/--resume
+  gepa_run.py                   # GEPA orchestrator: --auto-respond
+  gepa_adapter.py               # GEPA evaluator bridge (score, side_info)
+  gepa_manual_lm.py             # File-based LLM for GEPA
   tasks/
-    llvm_bench.py                # Shared: EvalConfig, compile, baseline, Optuna
+    llvm_bench.py                # Shared: EvalConfig, compile, baseline, Optuna, ASI
     llvm_inlining/
       evaluate.py                # _score(): bin_red% + speedup*10
       initial.cpp                # Seed: sums heuristic features - threshold
@@ -307,6 +442,9 @@ src/mlirAgent/evolve/
         compile_testsuite.sh     # Script to build .bc from llvm-test-suite
         testsuite/               # .bc files (gitignored, built locally)
           data/                  # Runtime input data per benchmark
+    loop_unrolling/
+      evaluate.py                # _score(): 5*speedup% + bin_red%
+      initial.cpp                # Seed: LLVM default unroll heuristic
     regalloc_priority/
       evaluate.py                # _score(): 5*speedup% + bin_red%
       initial.cpp                # Seed: LLVM default bit-packed priority

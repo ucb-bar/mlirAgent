@@ -27,7 +27,8 @@ try:
     from ..llvm_bench import (
         EvalConfig, ScoreFormula, build_llvm, eval_benchmarks,
         extract_hyperparams, find_benchmarks, generate_asi, load_baseline,
-        load_baseline_stats, optuna_tune, patch_source, restore_source,
+        load_baseline_remarks, load_baseline_stats, optuna_tune,
+        patch_source, restore_source,
     )
 except ImportError:
     # Standalone loading by OpenEvolve's importlib (no parent package)
@@ -35,7 +36,8 @@ except ImportError:
     from llvm_bench import (
         EvalConfig, ScoreFormula, build_llvm, eval_benchmarks,
         extract_hyperparams, find_benchmarks, generate_asi, load_baseline,
-        load_baseline_stats, optuna_tune, patch_source, restore_source,
+        load_baseline_remarks, load_baseline_stats, optuna_tune,
+        patch_source, restore_source,
     )
 
 try:
@@ -147,6 +149,7 @@ def evaluate(program_path: str, config: EvalConfig = None) -> dict:
                 opt_timeout=config.opt_timeout,
                 enable_stats=config.enable_stats,
                 enable_perf=config.enable_perf_counters,
+                enable_remarks=config.enable_remarks,
             )
 
         result["combined_score"] = score
@@ -169,6 +172,9 @@ def evaluate(program_path: str, config: EvalConfig = None) -> dict:
         baseline_stats = None
         if config.enable_stats:
             baseline_stats = load_baseline_stats(config)
+        bl_remarks = None
+        if config.enable_remarks:
+            bl_remarks = load_baseline_remarks(config)
         asi = generate_asi(
             score, ev, baseline, baseline_stats=baseline_stats,
             formula=ScoreFormula(
@@ -176,6 +182,7 @@ def evaluate(program_path: str, config: EvalConfig = None) -> dict:
                 binary_weight=1.0,
                 description="5 x speedup% + binary_reduction%",
             ),
+            baseline_remarks=bl_remarks,
         )
 
         if EvaluationResult is not None:

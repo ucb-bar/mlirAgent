@@ -289,6 +289,195 @@ def parse_perf_output(perf_stderr):
     return counters
 
 
+# ---------------------------------------------------------------------------
+# Optimization remarks parsing (Tier 5)
+# ---------------------------------------------------------------------------
+
+# Pass names we care about for remarks
+_REMARK_PASSES = {"inline", "loop-unroll"}
+
+
+def parse_remarks(remarks_file):
+    """Parse LLVM optimization remarks YAML using line-by-line state machine.
+
+    Avoids PyYAML for performance (62MB files).  Extracts only inline and
+    loop-unroll related ``!Passed`` / ``!Missed`` documents.
+
+    Returns ``{"passed": [...], "missed": [...]}`` where each entry is
+    ``{"pass": str, "name": str, "function": str, "args": dict}``.
+    """
+    passed = []
+    missed = []
+
+    doc_type = None   # "passed" or "missed"
+    cur = None        # current document dict
+    in_args = False
+    last_arg_key = None
+
+    try:
+        fh = open(remarks_file, "r", errors="replace")
+    except OSError:
+        return {"passed": [], "missed": []}
+
+    try:
+        for line in fh:
+            stripped = line.rstrip()
+
+            # New document separator
+            if stripped.startswith("--- !"):
+                # Flush previous document
+                if cur and cur.get("pass") in _REMARK_PASSES:
+                    if doc_type == "passed":
+                        passed.append(cur)
+                    elif doc_type == "missed":
+                        missed.append(cur)
+
+                tag = stripped[5:].strip()
+                if tag == "Passed":
+                    doc_type = "passed"
+                    cur = {"pass": "", "name": "", "function": "", "args": {}}
+                    in_args = False
+                elif tag == "Missed":
+                    doc_type = "missed"
+                    cur = {"pass": "", "name": "", "function": "", "args": {}}
+                    in_args = False
+                else:
+                    doc_type = None
+                    cur = None
+                    in_args = False
+                continue
+
+            if cur is None:
+                continue
+
+            # End of document
+            if stripped == "...":
+                if cur.get("pass") in _REMARK_PASSES:
+                    if doc_type == "passed":
+                        passed.append(cur)
+                    elif doc_type == "missed":
+                        missed.append(cur)
+                cur = None
+                doc_type = None
+                in_args = False
+                continue
+
+            # Top-level fields
+            if not in_args:
+                if stripped.startswith("Pass:"):
+                    cur["pass"] = stripped.split(":", 1)[1].strip().strip("'\"")
+                elif stripped.startswith("Name:"):
+                    cur["name"] = stripped.split(":", 1)[1].strip().strip("'\"")
+                elif stripped.startswith("Function:"):
+                    cur["function"] = stripped.split(":", 1)[1].strip().strip("'\"")
+                elif stripped.startswith("Args:"):
+                    in_args = True
+                    last_arg_key = None
+            else:
+                # Inside Args list — look for key-value pairs
+                s = stripped.lstrip()
+                if s.startswith("- "):
+                    # New arg entry: "- Callee: foo"
+                    kv = s[2:]
+                    colon = kv.find(":")
+                    if colon > 0:
+                        key = kv[:colon].strip()
+                        val = kv[colon + 1:].strip().strip("'\"")
+                        cur["args"][key] = val
+                        last_arg_key = key
+                elif ":" in s and not s.startswith("#"):
+                    # Continuation key on same arg: "  Cost: '15'"
+                    colon = s.find(":")
+                    key = s[:colon].strip()
+                    val = s[colon + 1:].strip().strip("'\"")
+                    if key:
+                        cur["args"][key] = val
+    finally:
+        fh.close()
+
+    # Flush last document
+    if cur and cur.get("pass") in _REMARK_PASSES:
+        if doc_type == "passed":
+            passed.append(cur)
+        elif doc_type == "missed":
+            missed.append(cur)
+
+    return {"passed": passed, "missed": missed}
+
+
+def summarize_remarks(evolved_remarks, baseline_remarks):
+    """Compare evolved vs baseline remarks to find flipped decisions.
+
+    Returns a compact summary dict with counts and top flipped decisions.
+    """
+    summary = {
+        "evolved_passed": len(evolved_remarks.get("passed", [])),
+        "evolved_missed": len(evolved_remarks.get("missed", [])),
+        "baseline_passed": len(baseline_remarks.get("passed", [])),
+        "baseline_missed": len(baseline_remarks.get("missed", [])),
+        "flipped": [],
+    }
+
+    # Build lookup: (function, callee) -> doc for baseline
+    def _key(doc):
+        callee = doc["args"].get("Callee", "")
+        return (doc["function"], callee)
+
+    bl_passed = {}
+    for doc in baseline_remarks.get("passed", []):
+        k = _key(doc)
+        bl_passed[k] = doc
+
+    bl_missed = {}
+    for doc in baseline_remarks.get("missed", []):
+        k = _key(doc)
+        bl_missed[k] = doc
+
+    # Find newly passed (were missed in baseline)
+    for doc in evolved_remarks.get("passed", []):
+        k = _key(doc)
+        if k in bl_missed:
+            bl_doc = bl_missed[k]
+            flip = {
+                "function": doc["function"],
+                "callee": doc["args"].get("Callee", ""),
+                "pass": doc["pass"],
+                "direction": "newly_passed",
+                "evolved_cost": doc["args"].get("Cost", ""),
+                "evolved_threshold": doc["args"].get("Threshold", ""),
+                "baseline_cost": bl_doc["args"].get("Cost", ""),
+                "baseline_threshold": bl_doc["args"].get("Threshold", ""),
+            }
+            summary["flipped"].append(flip)
+
+    # Find newly missed (were passed in baseline)
+    for doc in evolved_remarks.get("missed", []):
+        k = _key(doc)
+        if k in bl_passed:
+            bl_doc = bl_passed[k]
+            flip = {
+                "function": doc["function"],
+                "callee": doc["args"].get("Callee", ""),
+                "pass": doc["pass"],
+                "direction": "newly_missed",
+                "evolved_cost": doc["args"].get("Cost", ""),
+                "evolved_threshold": doc["args"].get("Threshold", ""),
+                "baseline_cost": bl_doc["args"].get("Cost", ""),
+                "baseline_threshold": bl_doc["args"].get("Threshold", ""),
+            }
+            summary["flipped"].append(flip)
+
+    # Sort flipped by absolute cost difference (most impactful first)
+    def _sort_key(f):
+        try:
+            return abs(int(f["evolved_cost"]) - int(f["baseline_cost"]))
+        except (ValueError, TypeError):
+            return 0
+    summary["flipped"].sort(key=_sort_key, reverse=True)
+
+    return summary
+
+
 def run_perf_stat(name, binary_path, tmp_dir, data_dir,
                   counters=None):
     """Run a single ``perf stat`` measurement. Returns dict of counter values."""
@@ -416,7 +605,7 @@ def run_benchmark(name: str, binary_path: str, tmp_dir: str, data_dir: str,
 def compile_benchmark(bc_path, opt_path, llc_path, tmp_dir, data_dir,
                       evolved_opt_flags=None, evolved_llc_flags=None,
                       opt_timeout=120, enable_stats=False,
-                      enable_perf=False):
+                      enable_perf=False, enable_remarks=False):
     """Compile a .bc file through ``opt -> llc -> gcc``.
 
     Callers pass evolved flags to *opt*, *llc*, or both:
@@ -435,12 +624,16 @@ def compile_benchmark(bc_path, opt_path, llc_path, tmp_dir, data_dir,
     def _err(msg):
         return {"text_size": None, "binary_size": None, "runtime": None,
                 "timings": [], "opt_stats": {}, "llc_stats": {},
-                "perf_counters": {}, "error": msg}
+                "perf_counters": {}, "opt_remarks": {}, "error": msg}
 
     # opt pass
     opt_cmd = [str(opt_path), "-O2"]
     if enable_stats:
         opt_cmd.append("-stats")
+    remarks_file = None
+    if enable_remarks:
+        remarks_file = os.path.join(tmp_dir, f"{name}_remarks.yaml")
+        opt_cmd.append(f"-pass-remarks-output={remarks_file}")
     if evolved_opt_flags:
         opt_cmd.extend(evolved_opt_flags)
     opt_cmd += [str(bc_path), "-o", opt_bc]
@@ -455,6 +648,7 @@ def compile_benchmark(bc_path, opt_path, llc_path, tmp_dir, data_dir,
         return _err(proc.stderr[:500])
 
     opt_stats = parse_stats(proc.stderr) if enable_stats else {}
+    opt_remarks = parse_remarks(remarks_file) if remarks_file else {}
 
     # llc: bitcode -> object
     llc_cmd = [str(llc_path), "-O2", "-filetype=obj", "-relocation-model=pic"]
@@ -487,11 +681,12 @@ def compile_benchmark(bc_path, opt_path, llc_path, tmp_dir, data_dir,
     except subprocess.TimeoutExpired:
         return {"text_size": text_size, "binary_size": None, "runtime": None,
                 "timings": [], "opt_stats": opt_stats, "llc_stats": llc_stats,
-                "perf_counters": {}, "error": "link timed out"}
+                "perf_counters": {}, "opt_remarks": opt_remarks,
+                "error": "link timed out"}
     if proc.returncode != 0:
         return {"text_size": text_size, "binary_size": None, "runtime": None,
                 "timings": [], "opt_stats": opt_stats, "llc_stats": llc_stats,
-                "perf_counters": {},
+                "perf_counters": {}, "opt_remarks": opt_remarks,
                 "error": f"link failed: {proc.stderr[:200]}"}
 
     binary_size = os.path.getsize(binary)
@@ -510,6 +705,7 @@ def compile_benchmark(bc_path, opt_path, llc_path, tmp_dir, data_dir,
         "opt_stats": opt_stats,
         "llc_stats": llc_stats,
         "perf_counters": perf_counters,
+        "opt_remarks": opt_remarks,
         "error": None,
     }
 
@@ -614,7 +810,8 @@ def load_baseline(config: EvalConfig):
 def eval_benchmarks(benchmarks, opt_path, llc_path, baseline, tmp_dir,
                     data_dir, score_fn, evolved_opt_flags=None,
                     evolved_llc_flags=None, opt_timeout=120,
-                    enable_stats=False, enable_perf=False):
+                    enable_stats=False, enable_perf=False,
+                    enable_remarks=False):
     """Compile and score benchmarks.
 
     *score_fn(total_binary, baseline_total_binary, speedups)* computes the
@@ -639,6 +836,7 @@ def eval_benchmarks(benchmarks, opt_path, llc_path, baseline, tmp_dir,
             opt_timeout=opt_timeout,
             enable_stats=enable_stats,
             enable_perf=enable_perf,
+            enable_remarks=enable_remarks,
         )
         bl = baseline.get(bc.name, {})
         text_size = r.get("text_size")
@@ -654,6 +852,7 @@ def eval_benchmarks(benchmarks, opt_path, llc_path, baseline, tmp_dir,
             "opt_stats": r.get("opt_stats", {}),
             "llc_stats": r.get("llc_stats", {}),
             "perf_counters": r.get("perf_counters", {}),
+            "opt_remarks": r.get("opt_remarks", {}),
         }
 
         if err:
@@ -811,16 +1010,17 @@ def _fmt_runtime(seconds):
 
 
 def generate_asi(score, result_dict, baseline, baseline_stats=None,
-                 formula=None):
+                 formula=None, baseline_remarks=None):
     """Generate Actionable Side Information markdown narrative.
 
     Produces structured diagnostic feedback (GEPA-style "text gradients")
-    with up to four tiers of analysis:
+    with up to five tiers of analysis:
 
     - **Tier 1** — Score decomposition + per-benchmark signal classification
     - **Tier 2** — Compiler statistics delta vs baseline (requires *baseline_stats*)
     - **Tier 3** — Runtime variance from individual timings
     - **Tier 4** — Hardware perf counters (if collected)
+    - **Tier 5** — Optimization decision changes (requires *baseline_remarks*)
     """
     if formula is None:
         formula = ScoreFormula()
@@ -1011,6 +1211,71 @@ def generate_asi(score, result_dict, baseline, baseline_stats=None,
                 lines.append(f"| {counter} | {value:,} |")
         lines.append("")
 
+    # ---- Tier 5: Optimization Decision Changes ----
+    if baseline_remarks:
+        has_remarks = any(details[b].get("opt_remarks") for b in details)
+        if has_remarks:
+            lines.append("### Optimization Decisions")
+            for bname in sorted(details.keys()):
+                evolved_rm = details[bname].get("opt_remarks", {})
+                bl_rm = baseline_remarks.get(bname, {})
+                if not evolved_rm and not bl_rm:
+                    continue
+
+                summary = summarize_remarks(evolved_rm, bl_rm)
+                flipped = summary.get("flipped", [])
+                if not flipped and summary["evolved_passed"] == summary["baseline_passed"]:
+                    continue
+
+                short = bname.replace(".bc", "")
+                n_flipped = len(flipped)
+                newly_passed = sum(
+                    1 for f in flipped if f["direction"] == "newly_passed"
+                )
+                newly_missed = sum(
+                    1 for f in flipped if f["direction"] == "newly_missed"
+                )
+                lines.append(
+                    f"\n**{short}** ({n_flipped} decisions changed vs baseline):"
+                )
+                if newly_passed:
+                    lines.append(f"- {newly_passed} newly passed (were rejected)")
+                if newly_missed:
+                    lines.append(f"- {newly_missed} newly rejected (were passed)")
+
+                # Show top flipped decisions with cost/threshold info
+                top_flips = flipped[:5]
+                if top_flips:
+                    lines.append("")
+                    lines.append(
+                        "| Function | Callee | Direction | "
+                        "BL Cost/Thresh | Ev Cost/Thresh |"
+                    )
+                    lines.append(
+                        "|----------|--------|-----------|"
+                        "----------------|----------------|"
+                    )
+                    for f in top_flips:
+                        direction = (
+                            "now passed" if f["direction"] == "newly_passed"
+                            else "now rejected"
+                        )
+                        bl_ct = (
+                            f"{f['baseline_cost']}/{f['baseline_threshold']}"
+                            if f["baseline_cost"] else "N/A"
+                        )
+                        ev_ct = (
+                            f"{f['evolved_cost']}/{f['evolved_threshold']}"
+                            if f["evolved_cost"] else "N/A"
+                        )
+                        func = f["function"][:30]
+                        callee = f["callee"][:20]
+                        lines.append(
+                            f"| {func} | {callee} | {direction} "
+                            f"| {bl_ct} | {ev_ct} |"
+                        )
+            lines.append("")
+
     return "\n".join(lines)
 
 
@@ -1065,3 +1330,47 @@ def load_baseline_stats(config):
         pass
 
     return baseline_stats
+
+
+def load_baseline_remarks(config):
+    """Load or compute baseline optimization remarks.
+
+    Remarks are cached in ``baseline_remarks.json`` alongside the baseline
+    file.  Re-generates when the file is missing.  Only called when
+    ``config.enable_remarks`` is True.
+    """
+    remarks_path = Path(config.baseline_file).parent / "baseline_remarks.json"
+    if remarks_path.exists():
+        with open(remarks_path) as f:
+            return json.load(f)
+
+    opt_path = os.path.join(config.build_dir, "bin", "opt")
+    llc_path = os.path.join(config.build_dir, "bin", "llc")
+    benchmarks = find_benchmarks(Path(config.testsuite_dir))
+
+    if not benchmarks:
+        return {}
+
+    baseline_remarks = {}
+    with tempfile.TemporaryDirectory(prefix="evolve_blremarks_") as tmp_dir:
+        for bc in benchmarks:
+            print(f"  Baseline remarks: {bc.stem}...", end=" ", flush=True)
+            r = compile_benchmark(
+                bc, opt_path, llc_path, tmp_dir, config.data_dir,
+                opt_timeout=config.opt_timeout, enable_remarks=True,
+            )
+            remarks = r.get("opt_remarks", {})
+            n_passed = len(remarks.get("passed", []))
+            n_missed = len(remarks.get("missed", []))
+            baseline_remarks[bc.name] = remarks
+            print(f"passed={n_passed}, missed={n_missed}")
+
+    try:
+        os.makedirs(remarks_path.parent, exist_ok=True)
+        with open(remarks_path, "w") as f:
+            json.dump(baseline_remarks, f)
+        print(f"  Baseline remarks saved to {remarks_path}")
+    except OSError:
+        pass
+
+    return baseline_remarks
