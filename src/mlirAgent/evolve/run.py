@@ -1,124 +1,154 @@
-"""CLI entry point for the evolve harness.
+"""Unified entry point for LLVM heuristic evolution.
 
-Usage:
-    python -m mlirAgent.evolve.run --task llvm_inlining --framework openevolve --agent claude_opus
-    python -m mlirAgent.evolve.run --list
-    python -m mlirAgent.evolve.run --task llvm_inlining --framework openevolve --agent claude_opus --dry-run
+Supports two evolution frameworks dispatched via ``--framework``:
+  - **gepa** (default): GEPA optimize_anything() with ASI as native side-info
+  - **openevolve**: MAP-Elites with ManualLLM
+
+Both frameworks share the same evaluator pipeline (``tasks/llvm_bench.py``),
+which includes Optuna hyperparameter tuning when ``[hyperparam]`` annotations
+are present in the evolved C++ code.
+
+Usage::
+
+    # GEPA with auto-respond (smoke test)
+    python run.py --task llvm_inlining --max-evals 2 --auto
+
+    # GEPA manual mode (Claude Code or human writes response files)
+    python run.py --task llvm_inlining --max-evals 10
+
+    # OpenEvolve
+    python run.py --framework openevolve --task llvm_inlining --max-evals 10 --auto
+
+    # Override Optuna trials
+    python run.py --task llvm_inlining --max-evals 10 --optuna-trials 5
 """
 
 import argparse
-import json
+import os
 import sys
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, Optional
 
-import yaml
+_BASE_DIR = Path(__file__).resolve().parent
 
-from ..config import Config
-from .adapters import ADAPTERS
-from .providers import load_agent_config, list_agents
+# Ensure local packages are importable
+if str(_BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(_BASE_DIR))
 
+_TASKS = ["llvm_inlining", "loop_unrolling", "regalloc_priority"]
 
-# Registry of available tasks
-TASKS = {
-    "llvm_inlining": "mlirAgent.evolve.tasks.llvm_inlining.task.LLVMInliningTask",
+_TASK_INITIAL = {
+    "llvm_inlining": _BASE_DIR / "tasks" / "llvm_inlining" / "initial.cpp",
+    "loop_unrolling": _BASE_DIR / "tasks" / "loop_unrolling" / "initial.cpp",
+    "regalloc_priority": _BASE_DIR / "tasks" / "regalloc_priority" / "initial.cpp",
 }
-
-
-def _load_task(task_name: str, configs_dir: str) -> Any:
-    """Instantiate a task by name, loading its YAML config if present."""
-    if task_name not in TASKS:
-        raise ValueError(f"Unknown task: {task_name}. Available: {list(TASKS.keys())}")
-
-    # Import task class
-    module_path, class_name = TASKS[task_name].rsplit(".", 1)
-    import importlib
-    mod = importlib.import_module(module_path)
-    task_cls = getattr(mod, class_name)
-
-    # Load task YAML config
-    task_yaml = Path(configs_dir) / "tasks" / f"{task_name}.yaml"
-    task_config = {}
-    if task_yaml.exists():
-        with open(task_yaml) as f:
-            task_config = yaml.safe_load(f) or {}
-
-    return task_cls(task_config)
-
-
-def _load_framework_config(framework_name: str, configs_dir: str) -> Dict[str, Any]:
-    """Load framework YAML config."""
-    fw_yaml = Path(configs_dir) / "frameworks" / f"{framework_name}.yaml"
-    if not fw_yaml.exists():
-        raise FileNotFoundError(f"Framework config not found: {fw_yaml}")
-    with open(fw_yaml) as f:
-        return yaml.safe_load(f) or {}
-
-
-def _list_available(configs_dir: str):
-    """Print available agents, frameworks, and tasks."""
-    print("Available configurations:\n")
-
-    print("  Agents:")
-    agents_dir = Path(configs_dir) / "agents"
-    if agents_dir.exists():
-        for p in sorted(agents_dir.glob("*.yaml")):
-            print(f"    - {p.stem}")
-    else:
-        print("    (none)")
-
-    print("\n  Frameworks:")
-    fw_dir = Path(configs_dir) / "frameworks"
-    if fw_dir.exists():
-        for p in sorted(fw_dir.glob("*.yaml")):
-            print(f"    - {p.stem}")
-    else:
-        print("    (none)")
-
-    print("\n  Tasks:")
-    for name in sorted(TASKS.keys()):
-        print(f"    - {name}")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Evolve harness: evolutionary compiler optimization"
+        description="Evolve LLVM heuristics via LLM-guided search",
     )
-    parser.add_argument("--task", "-t", help="Task name (e.g. llvm_inlining)")
-    parser.add_argument("--framework", "-f", help="Framework name (e.g. openevolve)")
-    parser.add_argument("--agent", "-a", help="Agent config name (e.g. claude_opus)")
-    parser.add_argument("--list", action="store_true", help="List available configs")
-    parser.add_argument("--dry-run", action="store_true", help="Print config without running")
-    parser.add_argument("--max-iterations", type=int, help="Override max iterations")
-    parser.add_argument("--configs-dir", default=Config.EVOLVE_CONFIGS_DIR,
-                        help="Path to configs directory")
-
+    parser.add_argument(
+        "--framework", "-f", default="gepa",
+        choices=["gepa", "openevolve"],
+        help="Evolution framework (default: gepa)",
+    )
+    parser.add_argument(
+        "--task", "-t", required=True,
+        choices=_TASKS,
+        help="LLVM task to optimize",
+    )
+    parser.add_argument(
+        "--initial", default=None,
+        help="Override initial C++ source path",
+    )
+    parser.add_argument(
+        "--max-evals", "-n", type=int, default=10,
+        help="Max evaluator calls / iterations (default: 10)",
+    )
+    parser.add_argument(
+        "--auto", action="store_true",
+        help="Auto-respond to prompts (for smoke testing)",
+    )
+    parser.add_argument(
+        "--prompts-dir", default=None,
+        help="Prompt/response directory (default: auto)",
+    )
+    parser.add_argument(
+        "--output", default=None,
+        help="Save best code to this path",
+    )
+    parser.add_argument(
+        "--resume", default=None,
+        help="Resume from checkpoint (OpenEvolve only)",
+    )
+    parser.add_argument(
+        "--poll-interval", type=float, default=2.0,
+        help="ManualLM poll interval in seconds (default: 2.0)",
+    )
+    parser.add_argument(
+        "--optuna-trials", type=int, default=None,
+        help="Optuna inner-loop trials (overrides EVOLVE_OPTUNA_TRIALS env)",
+    )
     args = parser.parse_args()
-    configs_dir = args.configs_dir
 
-    if args.list:
-        _list_available(configs_dir)
-        return 0
+    # Set Optuna env var if specified
+    if args.optuna_trials is not None:
+        os.environ["EVOLVE_OPTUNA_TRIALS"] = str(args.optuna_trials)
 
-    if not all([args.task, args.framework, args.agent]):
-        parser.error("--task, --framework, and --agent are required (or use --list)")
+    # Set up experiment directory
+    mlirevolve_root = _BASE_DIR.parent.parent.parent
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    exp_dir = str(mlirevolve_root / "experiments" / f"run_{timestamp}")
+    prompts_dir = args.prompts_dir or os.path.join(exp_dir, "prompts")
+    os.makedirs(prompts_dir, exist_ok=True)
+    os.makedirs(exp_dir, exist_ok=True)
 
-    # Load everything
-    task = _load_task(args.task, configs_dir)
-    agent_config = load_agent_config(args.agent, configs_dir)
-    framework_config = _load_framework_config(args.framework, configs_dir)
+    # Resolve initial program
+    initial_file = args.initial or str(_TASK_INITIAL[args.task])
+    if not os.path.exists(initial_file):
+        print(f"Error: Initial source not found: {initial_file}")
+        sys.exit(1)
 
-    # Get adapter
-    if args.framework not in ADAPTERS:
-        print(f"Error: Unknown framework '{args.framework}'. Available: {list(ADAPTERS.keys())}")
-        return 1
+    # Print header
+    optuna_trials = args.optuna_trials or os.environ.get("EVOLVE_OPTUNA_TRIALS", "20")
+    print(f"{'=' * 60}")
+    print(f"Evolve LLVM Heuristics")
+    print(f"  Framework:      {args.framework}")
+    print(f"  Task:           {args.task}")
+    print(f"  Initial:        {initial_file}")
+    print(f"  Max evals:      {args.max_evals}")
+    print(f"  Optuna trials:  {optuna_trials}")
+    print(f"  Auto-respond:   {args.auto}")
+    print(f"  Prompts:        {prompts_dir}")
+    print(f"  Experiment:     {exp_dir}")
+    print(f"{'=' * 60}")
+    print()
 
-    adapter = ADAPTERS[args.framework]()
-    adapter.configure(task, agent_config, framework_config)
+    # Dispatch to framework adapter
+    if args.framework == "gepa":
+        from adapters import GEPAAdapter
+        adapter = GEPAAdapter()
+    else:
+        from adapters import OpenEvolveAdapter
+        adapter = OpenEvolveAdapter()
 
-    # Run
-    result = adapter.launch(dry_run=args.dry_run, max_iterations=args.max_iterations)
-    print(json.dumps(result, indent=2, default=str))
+    result = adapter.run(
+        task=args.task,
+        initial_file=initial_file,
+        prompts_dir=prompts_dir,
+        max_evals=args.max_evals,
+        auto_respond=args.auto,
+        poll_interval=args.poll_interval,
+        output=args.output or os.path.join(exp_dir, "best.cpp"),
+        exp_dir=exp_dir,
+        resume=args.resume,
+    )
+
+    print()
+    print(f"{'=' * 60}")
+    print(f"Done. Results in: {exp_dir}")
+    print(f"{'=' * 60}")
     return 0
 
 

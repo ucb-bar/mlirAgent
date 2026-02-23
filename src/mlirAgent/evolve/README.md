@@ -83,40 +83,58 @@ export LLVM_SRC_PATH=/scratch/ashvin/llvm-project
 export EVOLVE_BUILD_DIR=/scratch/ashvin/llvm-build
 export EVOLVE_OPTUNA_TRIALS=5   # 0 to disable Optuna
 
-# Launch (--wait mode: you respond to prompts manually or via Claude Code)
-python -m mlirAgent.evolve.manual_run --example llvm_inlining -n 10 --wait
+# GEPA (default) — manual mode: write prompt_NNN.response.md when prompted
+python run.py --task llvm_inlining --max-evals 10
 
-# Or auto mode (built-in heuristic strategies respond automatically)
-python -m mlirAgent.evolve.manual_run --example regalloc_priority -n 10 --auto
+# GEPA — auto mode for smoke testing
+python run.py --task llvm_inlining --max-evals 2 --auto
+
+# OpenEvolve — manual mode
+python run.py --framework openevolve --task llvm_inlining --max-evals 10
+
+# OpenEvolve — auto mode
+python run.py --framework openevolve --task regalloc_priority -n 10 --auto
+
+# Override Optuna trials
+python run.py --task llvm_inlining --max-evals 10 --optuna-trials 5
 ```
 
 This creates an experiment directory:
 ```
 experiments/run_20260219_132604/
-  scores.jsonl                    # One JSON line per iteration with all metrics
+  summary.json                    # Framework, task, output paths
+  best.cpp                        # Best evolved code
   prompts/
-    prompt_001.md                 # OpenEvolve prompt (parent code + history)
+    prompt_001.md                 # LLM prompt (GEPA reflection or OpenEvolve parent code)
     prompt_001.response.md        # LLM/agent response (new code)
     prompt_002.md
     ...
-  openevolve_output/
-    checkpoints/checkpoint_N/     # Population state for --resume
-    best/best_program.cpp         # Best evolved program
-    logs/openevolve_*.log         # Detailed log
+  gepa_state/                     # GEPA only: optimizer state (for resume)
+  openevolve_output/              # OpenEvolve only:
+    checkpoints/checkpoint_N/     #   Population state for --resume
+    best/best_program.cpp         #   Best evolved program
+    logs/openevolve_*.log         #   Detailed log
+  scores.jsonl                    # OpenEvolve only: per-iteration metrics
 ```
 
 ### What Happens Each Iteration
 
 ```
+    run.py --framework {gepa, openevolve}
+                        │
+            ┌───────────┴───────────┐
+            ▼                       ▼
+    ┌───────────────┐     ┌──────────────────────┐
+    │ GEPAAdapter   │     │ OpenEvolveAdapter    │
+    │ (Pareto       │     │ (MAP-Elites          │
+    │  frontier)    │     │  population)         │
+    └───────┬───────┘     └──────────┬───────────┘
+            │                        │
+            └───────────┬────────────┘
+                        │ 1. Select/reflect on parent
+                        ▼
                         ┌─────────────────────────────────┐
-                        │        OpenEvolve Controller     │
-                        │  (population, MAP-Elites, etc.)  │
-                        └────────────┬────────────────────┘
-                                     │ 1. Sample parent program
-                                     │    from population
-                                     ▼
-                        ┌─────────────────────────────────┐
-                        │          ManualLLM Bridge        │
+                        │       ManualLM / ManualLLM       │
                         │  Write prompt_NNN.md to disk     │
                         │  Poll for prompt_NNN.response.md │
                         └────────────┬────────────────────┘
@@ -124,7 +142,7 @@ experiments/run_20260219_132604/
                                      │    writes response file
                                      ▼
                         ┌─────────────────────────────────┐
-                        │       Task Evaluator (evaluate.py)│
+                        │    evaluator.py → evaluate.py    │
                         └────────────┬────────────────────┘
                                      │
               ┌──────────────────────┼──────────────────────┐
@@ -308,36 +326,31 @@ diagnostic context for proposing improvements.
 
 ### Usage
 
+Both frameworks are accessed through the unified `run.py`:
+
 ```bash
-# Manual mode: prompts appear as prompt_NNN.md, you write prompt_NNN.response.md
-python gepa_run.py --task llvm_inlining --max-evals 10
+# GEPA — manual mode
+python run.py --task llvm_inlining --max-evals 10
 
-# Auto mode for smoke testing (auto-responds with trivially modified code)
-python gepa_run.py --task llvm_inlining --max-evals 2 --auto-respond
+# GEPA — auto mode for smoke testing
+python run.py --task llvm_inlining --max-evals 2 --auto
+
+# OpenEvolve
+python run.py --framework openevolve --task llvm_inlining --max-evals 10
 ```
-
-### Configuration
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--task` | (required) | `llvm_inlining`, `loop_unrolling`, or `regalloc_priority` |
-| `--max-evals` | 10 | Maximum evaluator calls (seed + proposals) |
-| `--prompts-dir` | `gepa_prompts` | Directory for prompt/response files |
-| `--output-dir` | `<prompts-dir>/run` | GEPA state directory (for resume) |
-| `--auto-respond` | off | Spawn background thread that auto-creates responses |
 
 ### GEPA vs OpenEvolve
 
-| Feature | OpenEvolve | GEPA |
-|---------|-----------|------|
-| Population | MAP-Elites (50 candidates) | Pareto frontier |
-| Feedback | Scalar score only → ASI via artifacts | Native side-info channel |
-| LLM interface | ManualLLM (file-based) | ManualLM (file-based) |
-| Hyperparameter tuning | Optuna inner-loop | Not integrated (future) |
-| Resume | Checkpoint directory | `run_dir` state |
+| Feature | GEPA (default) | OpenEvolve |
+|---------|----------------|-----------|
+| Population | Pareto frontier | MAP-Elites (10 candidates) |
+| Feedback | Native side-info `(score, {"Feedback": ASI})` | ASI via `artifacts["asi"]` |
+| LLM interface | ManualLM (`gepa_manual_lm.py`) | ManualLLM (`third_party/openevolve/`) |
+| Hyperparameter tuning | Optuna inner-loop | Optuna inner-loop |
+| Resume | `gepa_state/` directory | Checkpoint directory |
 
-Both frameworks use our same evaluation pipeline (`llvm_bench.py`), so scores
-are directly comparable.
+Both frameworks share the same evaluation pipeline (`evaluator.py` → `llvm_bench.py`),
+so scores are directly comparable.
 
 ## LLVM Hooks
 
@@ -428,9 +441,9 @@ config = EvalConfig.from_env(
 
 ```
 src/mlirAgent/evolve/
-  manual_run.py                  # OpenEvolve orchestrator: --auto/--wait/--resume
-  gepa_run.py                   # GEPA orchestrator: --auto-respond
-  gepa_adapter.py               # GEPA evaluator bridge (score, side_info)
+  run.py                         # Unified CLI: --framework {gepa,openevolve}
+  adapters.py                    # GEPAAdapter + OpenEvolveAdapter
+  evaluator.py                   # Framework-agnostic evaluator bridge
   gepa_manual_lm.py             # File-based LLM for GEPA
   tasks/
     llvm_bench.py                # Shared: EvalConfig, compile, baseline, Optuna, ASI
@@ -461,8 +474,10 @@ experiments/                     # Output (gitignored)
 1. Create `tasks/my_task/` with `initial.cpp` and `evaluate.py`
 2. In `evaluate.py`, define `_score(total_binary, baseline_binary, speedups)`
 3. Call shared functions from `llvm_bench.py` with the right evolved flags
-4. Add entry to `EXAMPLES` dict in `manual_run.py`
-5. If the evolved code affects `llc` (not `opt`), use `flag_target="llc"` in
+4. Add task name to `_TASKS` and `_TASK_INITIAL` in `run.py`
+5. Add task config to `_TASK_CONFIG` in `evaluator.py`
+6. Add objective string to `_TASK_OBJECTIVE` in `adapters.py`
+7. If the evolved code affects `llc` (not `opt`), use `flag_target="llc"` in
    `optuna_tune()` and pass flags via `evolved_llc_flags`
 
 ## Scoring Formulas

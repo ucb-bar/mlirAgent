@@ -1,72 +1,121 @@
+"""Evaluator bridges for LLVM heuristic evolution.
+
+Creates framework-agnostic evaluator callables that:
+1. Write candidate C++ to a temp file
+2. Call the task-specific evaluate() (patch LLVM, build, benchmark)
+3. Return (score, side_info) for GEPA or EvaluationResult for OpenEvolve
+
+The actual compilation/benchmark logic lives in ``tasks/llvm_bench.py``
+and per-task ``evaluate.py`` files.
+"""
+
 import os
 import re
-import subprocess
-import optuna
-from typing import Dict, Any
-from openevolve.evaluation_result import EvaluationResult
+import sys
+import tempfile
+from pathlib import Path
 
-class MagellanEvaluator:
-    def __init__(self, llvm_build_dir, benchmark_script):
-        self.build_dir = llvm_build_dir
-        self.benchmark_script = benchmark_script
+# Ensure tasks package is importable when run standalone
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-    def evaluate(self, code: str) -> EvaluationResult:
-        # 1. Inject Code into LLVM Source
-        self._inject_code(code)
+from tasks.llvm_bench import EvalConfig
 
-        # 2. Compile LLVM (Incremental)
-        # We only rebuild the relevant library to save time
-        build_cmd = ["ninja", "-C", self.build_dir, "lib/Analysis/AEInlineAdvisor.o"]
-        if subprocess.run(build_cmd).returncode != 0:
-            return EvaluationResult(score=float('-inf'), error="Compilation Failed")
-        
-        # Link the final tool (e.g., opt or clang)
-        subprocess.run(["ninja", "-C", self.build_dir, "bin/opt"])
+_EVOLVE_BLOCK_RE = re.compile(
+    r"(// EVOLVE-BLOCK-START\n)(.*?)(// EVOLVE-BLOCK-END)",
+    re.DOTALL,
+)
 
-        # 3. Inner Loop: Hyperparameter Tuning (The Magellan "Secret Sauce")
-        # Extract params defined in the C++ comments
-        params = self._extract_hyperparams(code) 
-        
-        if not params:
-            # No params to tune, just run once
-            score = self._run_benchmark({})
-            return EvaluationResult(score=score)
 
-        # Use Optuna to tune the exposed flags
-        study = optuna.create_study(direction="maximize")
-        study.optimize(lambda trial: self._objective(trial, params), n_trials=20)
-        
-        best_score = study.best_value
-        best_params = study.best_params
-        
-        return EvaluationResult(
-            score=best_score, 
-            metadata={"tuned_params": best_params}
-        )
+def extract_evolve_block(code):
+    """Extract the EVOLVE-BLOCK content from C++ source code."""
+    m = _EVOLVE_BLOCK_RE.search(code)
+    if m:
+        return m.group(2)
+    return code
 
-    def _objective(self, trial, params_schema):
-        # Map trial suggestions to LLVM flags
-        # e.g., -ae-inline-base-threshold=255
-        flags = []
-        for name, type_, min_v, max_v in params_schema:
-            val = trial.suggest_int(name, int(min_v), int(max_v))
-            flags.append(f"-{name}={val}")
-            
-        return self._run_benchmark(flags)
 
-    def _run_benchmark(self, flags):
-        # Execute the benchmark script with the tuned flags
-        cmd = [self.benchmark_script] + flags
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        # Parse output for binary size reduction or execution speed
-        return self._parse_score(result.stdout)
+def inject_evolve_block(template, block):
+    """Replace EVOLVE-BLOCK in *template* with new *block* content."""
+    return _EVOLVE_BLOCK_RE.sub(
+        lambda m: m.group(1) + block + m.group(3),
+        template,
+    )
 
-    def _extract_hyperparams(self, code):
-        # Regex to find lines like: // [hyperparam]: name, type, min, max
-        pattern = r"//\s*\[hyperparam\]:\s*([\w-]+),\s*(\w+),\s*(\d+),\s*(\d+)"
-        return re.findall(pattern, code)
 
-    def _inject_code(self, code):
-        target_path = "llvm-project/llvm/lib/Analysis/AEInlineAdvisor.cpp"
-        with open(target_path, "w") as f:
-            f.write(code)
+# Task → (target_file, default baseline overrides)
+_TASK_CONFIG = {
+    "llvm_inlining": {
+        "target_file": "llvm/lib/Analysis/EvolvedInlineCost.cpp",
+    },
+    "loop_unrolling": {
+        "target_file": "llvm/lib/Transforms/Scalar/EvolvedLoopUnroll.cpp",
+        "baseline_file": str(
+            Path(__file__).resolve().parent
+            / "tasks" / "loop_unrolling" / "baseline_unroll.json"
+        ),
+    },
+    "regalloc_priority": {
+        "target_file": "llvm/lib/CodeGen/EvolvedRegAllocPriority.cpp",
+        "baseline_file": str(
+            Path(__file__).resolve().parent
+            / "tasks" / "regalloc_priority" / "baseline_regalloc.json"
+        ),
+    },
+}
+
+
+def _import_evaluate(task_name):
+    """Import the task-specific evaluate function."""
+    if task_name == "llvm_inlining":
+        from tasks.llvm_inlining.evaluate import evaluate
+    elif task_name == "loop_unrolling":
+        from tasks.loop_unrolling.evaluate import evaluate
+    elif task_name == "regalloc_priority":
+        from tasks.regalloc_priority.evaluate import evaluate
+    else:
+        raise ValueError(f"Unknown task: {task_name}")
+    return evaluate
+
+
+def make_evaluator(task_name, config=None):
+    """Create an evaluator function for a given task.
+
+    Returns a callable ``code_str -> (score, side_info)`` matching GEPA's
+    evaluator protocol.  *side_info* is a dict that may contain a
+    ``"Feedback"`` key with ASI markdown text.
+
+    The same evaluator works with OpenEvolve — the score is extracted from
+    the returned tuple's first element.
+    """
+    evaluate = _import_evaluate(task_name)
+
+    if config is None:
+        tc = _TASK_CONFIG[task_name]
+        config = EvalConfig.from_env(tc["target_file"], **{
+            k: v for k, v in tc.items() if k != "target_file"
+        })
+
+    def evaluator(code_str):
+        """Write code to temp file, evaluate, return (score, side_info)."""
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".cpp", delete=False, prefix="evolve_"
+        ) as f:
+            f.write(code_str)
+            tmp_path = f.name
+        try:
+            result = evaluate(tmp_path, config=config)
+            if isinstance(result, dict):
+                score = result.get("combined_score", 0.0)
+                side_info = {}
+            else:
+                # EvaluationResult from OpenEvolve
+                score = result.metrics.get("combined_score", 0.0)
+                if hasattr(result, "artifacts") and "asi" in result.artifacts:
+                    side_info = {"Feedback": result.artifacts["asi"]}
+                else:
+                    side_info = {}
+            return score, side_info
+        finally:
+            os.unlink(tmp_path)
+
+    return evaluator
