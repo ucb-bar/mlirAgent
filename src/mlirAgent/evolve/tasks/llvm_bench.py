@@ -6,6 +6,7 @@ pipeline (opt -> llc -> gcc), baseline caching, scoring, and Optuna tuning.
 """
 
 import json
+import math
 import os
 import re
 import shutil
@@ -126,6 +127,9 @@ class EvalConfig:
     optuna_subset: list = field(default_factory=lambda: ["sqlite3", "spass", "tramp3d-v4"])
     ninja: str = ""
     build_targets: str = "bin/opt bin/llc"
+    enable_stats: bool = True         # Tier 2: -stats flag (zero overhead)
+    enable_perf_counters: bool = False  # Tier 4: perf stat (needs permissions)
+    enable_remarks: bool = False      # Tier 5: -pass-remarks-output (adds time)
 
     def __post_init__(self):
         if not self.testsuite_dir:
@@ -153,6 +157,15 @@ class EvalConfig:
             "target_file": os.environ.get("EVOLVE_TARGET_FILE", target_file),
             "opt_timeout": int(os.environ.get("EVOLVE_OPT_TIMEOUT", "120")),
             "optuna_trials": int(os.environ.get("EVOLVE_OPTUNA_TRIALS", "20")),
+            "enable_stats": os.environ.get(
+                "EVOLVE_ENABLE_STATS", "1"
+            ).lower() in ("1", "true"),
+            "enable_perf_counters": os.environ.get(
+                "EVOLVE_ENABLE_PERF", "0"
+            ).lower() in ("1", "true"),
+            "enable_remarks": os.environ.get(
+                "EVOLVE_ENABLE_REMARKS", "0"
+            ).lower() in ("1", "true"),
         }
         defaults.update(overrides)
         return cls(**defaults)
@@ -236,14 +249,304 @@ def get_text_size(obj_path: str) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Stats / perf parsing
+# ---------------------------------------------------------------------------
+
+# Matches LLVM -stats output: "  21479 inline  - Number of functions inlined"
+_STATS_RE = re.compile(r"^\s*(\d+)\s+([\w.-]+)\s+-\s+(.+)$", re.MULTILINE)
+
+
+def parse_stats(stderr_text):
+    """Parse LLVM ``-stats`` output from stderr.
+
+    Returns dict mapping ``"pass - description"`` to integer count.
+    """
+    stats = {}
+    for m in _STATS_RE.finditer(stderr_text):
+        count = int(m.group(1))
+        pass_name = m.group(2)
+        description = m.group(3).strip()
+        key = f"{pass_name} - {description}"
+        stats[key] = count
+    return stats
+
+
+def parse_perf_output(perf_stderr):
+    """Parse ``perf stat -x,`` CSV output.
+
+    Format per line: ``value,unit,event_name,...``
+    """
+    counters = {}
+    for line in perf_stderr.strip().split("\n"):
+        parts = line.split(",")
+        if len(parts) >= 3:
+            try:
+                value = int(parts[0].strip())
+                event = parts[2].strip()
+                counters[event] = value
+            except (ValueError, IndexError):
+                continue
+    return counters
+
+
+# ---------------------------------------------------------------------------
+# Optimization remarks parsing (Tier 5)
+# ---------------------------------------------------------------------------
+
+# Pass names we care about for remarks
+_REMARK_PASSES = {"inline", "loop-unroll"}
+
+
+def parse_remarks(remarks_file):
+    """Parse LLVM optimization remarks YAML using line-by-line state machine.
+
+    Avoids PyYAML for performance (62MB files).  Extracts only inline and
+    loop-unroll related ``!Passed`` / ``!Missed`` documents.
+
+    Returns ``{"passed": [...], "missed": [...]}`` where each entry is
+    ``{"pass": str, "name": str, "function": str, "args": dict}``.
+    """
+    passed = []
+    missed = []
+
+    doc_type = None   # "passed" or "missed"
+    cur = None        # current document dict
+    in_args = False
+    last_arg_key = None
+
+    try:
+        fh = open(remarks_file, "r", errors="replace")
+    except OSError:
+        return {"passed": [], "missed": []}
+
+    try:
+        for line in fh:
+            stripped = line.rstrip()
+
+            # New document separator
+            if stripped.startswith("--- !"):
+                # Flush previous document
+                if cur and cur.get("pass") in _REMARK_PASSES:
+                    if doc_type == "passed":
+                        passed.append(cur)
+                    elif doc_type == "missed":
+                        missed.append(cur)
+
+                tag = stripped[5:].strip()
+                if tag == "Passed":
+                    doc_type = "passed"
+                    cur = {"pass": "", "name": "", "function": "", "args": {}}
+                    in_args = False
+                elif tag == "Missed":
+                    doc_type = "missed"
+                    cur = {"pass": "", "name": "", "function": "", "args": {}}
+                    in_args = False
+                else:
+                    doc_type = None
+                    cur = None
+                    in_args = False
+                continue
+
+            if cur is None:
+                continue
+
+            # End of document
+            if stripped == "...":
+                if cur.get("pass") in _REMARK_PASSES:
+                    if doc_type == "passed":
+                        passed.append(cur)
+                    elif doc_type == "missed":
+                        missed.append(cur)
+                cur = None
+                doc_type = None
+                in_args = False
+                continue
+
+            # Top-level fields
+            if not in_args:
+                if stripped.startswith("Pass:"):
+                    cur["pass"] = stripped.split(":", 1)[1].strip().strip("'\"")
+                elif stripped.startswith("Name:"):
+                    cur["name"] = stripped.split(":", 1)[1].strip().strip("'\"")
+                elif stripped.startswith("Function:"):
+                    cur["function"] = stripped.split(":", 1)[1].strip().strip("'\"")
+                elif stripped.startswith("Args:"):
+                    in_args = True
+                    last_arg_key = None
+            else:
+                # Inside Args list — look for key-value pairs
+                s = stripped.lstrip()
+                if s.startswith("- "):
+                    # New arg entry: "- Callee: foo"
+                    kv = s[2:]
+                    colon = kv.find(":")
+                    if colon > 0:
+                        key = kv[:colon].strip()
+                        val = kv[colon + 1:].strip().strip("'\"")
+                        cur["args"][key] = val
+                        last_arg_key = key
+                elif ":" in s and not s.startswith("#"):
+                    # Continuation key on same arg: "  Cost: '15'"
+                    colon = s.find(":")
+                    key = s[:colon].strip()
+                    val = s[colon + 1:].strip().strip("'\"")
+                    if key:
+                        cur["args"][key] = val
+    finally:
+        fh.close()
+
+    # Flush last document
+    if cur and cur.get("pass") in _REMARK_PASSES:
+        if doc_type == "passed":
+            passed.append(cur)
+        elif doc_type == "missed":
+            missed.append(cur)
+
+    return {"passed": passed, "missed": missed}
+
+
+def summarize_remarks(evolved_remarks, baseline_remarks):
+    """Compare evolved vs baseline remarks to find flipped decisions.
+
+    Returns a compact summary dict with counts and top flipped decisions.
+    """
+    summary = {
+        "evolved_passed": len(evolved_remarks.get("passed", [])),
+        "evolved_missed": len(evolved_remarks.get("missed", [])),
+        "baseline_passed": len(baseline_remarks.get("passed", [])),
+        "baseline_missed": len(baseline_remarks.get("missed", [])),
+        "flipped": [],
+    }
+
+    # Build lookup: (function, callee) -> doc for baseline
+    def _key(doc):
+        callee = doc["args"].get("Callee", "")
+        return (doc["function"], callee)
+
+    bl_passed = {}
+    for doc in baseline_remarks.get("passed", []):
+        k = _key(doc)
+        bl_passed[k] = doc
+
+    bl_missed = {}
+    for doc in baseline_remarks.get("missed", []):
+        k = _key(doc)
+        bl_missed[k] = doc
+
+    # Find newly passed (were missed in baseline)
+    for doc in evolved_remarks.get("passed", []):
+        k = _key(doc)
+        if k in bl_missed:
+            bl_doc = bl_missed[k]
+            flip = {
+                "function": doc["function"],
+                "callee": doc["args"].get("Callee", ""),
+                "pass": doc["pass"],
+                "direction": "newly_passed",
+                "evolved_cost": doc["args"].get("Cost", ""),
+                "evolved_threshold": doc["args"].get("Threshold", ""),
+                "baseline_cost": bl_doc["args"].get("Cost", ""),
+                "baseline_threshold": bl_doc["args"].get("Threshold", ""),
+            }
+            summary["flipped"].append(flip)
+
+    # Find newly missed (were passed in baseline)
+    for doc in evolved_remarks.get("missed", []):
+        k = _key(doc)
+        if k in bl_passed:
+            bl_doc = bl_passed[k]
+            flip = {
+                "function": doc["function"],
+                "callee": doc["args"].get("Callee", ""),
+                "pass": doc["pass"],
+                "direction": "newly_missed",
+                "evolved_cost": doc["args"].get("Cost", ""),
+                "evolved_threshold": doc["args"].get("Threshold", ""),
+                "baseline_cost": bl_doc["args"].get("Cost", ""),
+                "baseline_threshold": bl_doc["args"].get("Threshold", ""),
+            }
+            summary["flipped"].append(flip)
+
+    # Sort flipped by absolute cost difference (most impactful first)
+    def _sort_key(f):
+        try:
+            return abs(int(f["evolved_cost"]) - int(f["baseline_cost"]))
+        except (ValueError, TypeError):
+            return 0
+    summary["flipped"].sort(key=_sort_key, reverse=True)
+
+    return summary
+
+
+def run_perf_stat(name, binary_path, tmp_dir, data_dir,
+                  counters=None):
+    """Run a single ``perf stat`` measurement. Returns dict of counter values."""
+    if counters is None:
+        counters = ["instructions", "cycles", "cache-misses", "branch-misses"]
+    config = BENCH_RUN_CONFIGS.get(name)
+    if not config:
+        return {}
+
+    run_dir = os.path.join(tmp_dir, f"{name}_perf")
+    os.makedirs(run_dir, exist_ok=True)
+    run_binary = os.path.join(run_dir, name)
+    shutil.copy2(binary_path, run_binary)
+    os.chmod(run_binary, 0o755)
+
+    bench_data = Path(data_dir) / name
+
+    # Copy data files (same logic as run_benchmark)
+    if config.get("data_subdir") and bench_data.exists():
+        for item in bench_data.iterdir():
+            dst = os.path.join(run_dir, item.name)
+            if item.is_dir():
+                shutil.copytree(str(item), dst, dirs_exist_ok=True)
+            else:
+                shutil.copy2(str(item), dst)
+    elif config.get("data_files") and bench_data.exists():
+        for f in config["data_files"]:
+            src = bench_data / f
+            if src.exists():
+                shutil.copy2(str(src), os.path.join(run_dir, f))
+
+    cmd = ["perf", "stat", "-e", ",".join(counters), "-x", ",",
+           run_binary] + config.get("args", [])
+    timeout = config.get("timeout", 30)
+    stdin_file = None
+    if config.get("stdin_file") and bench_data.exists():
+        stdin_file = bench_data / config["stdin_file"]
+
+    stdin_fh = None
+    try:
+        if stdin_file and stdin_file.exists():
+            stdin_fh = open(str(stdin_file), "r")
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout,
+            cwd=run_dir, stdin=stdin_fh,
+        )
+        return parse_perf_output(proc.stderr)
+    except (subprocess.TimeoutExpired, OSError):
+        return {}
+    finally:
+        if stdin_fh:
+            stdin_fh.close()
+
+
+# ---------------------------------------------------------------------------
 # Benchmark execution
 # ---------------------------------------------------------------------------
 
-def run_benchmark(name: str, binary_path: str, tmp_dir: str, data_dir: str):
-    """Run a benchmark with reference inputs; return wall-clock seconds or None."""
+def run_benchmark(name: str, binary_path: str, tmp_dir: str, data_dir: str,
+                  num_runs: int = 5):
+    """Run a benchmark with reference inputs.
+
+    Returns ``(median, all_timings)`` where *median* is the median
+    wall-clock seconds (or ``None`` on failure) and *all_timings* is the
+    sorted list of successful run durations.
+    """
     config = BENCH_RUN_CONFIGS.get(name)
     if not config:
-        return None
+        return None, []
 
     run_dir = os.path.join(tmp_dir, f"{name}_run")
     os.makedirs(run_dir, exist_ok=True)
@@ -267,36 +570,42 @@ def run_benchmark(name: str, binary_path: str, tmp_dir: str, data_dir: str):
             if src.exists():
                 shutil.copy2(str(src), os.path.join(run_dir, f))
 
-    # Prepare stdin
-    stdin_fh = None
-    if config.get("stdin_file") and bench_data.exists():
-        stdin_src = bench_data / config["stdin_file"]
-        if stdin_src.exists():
-            stdin_fh = open(str(stdin_src), "r")
-
     cmd = [run_binary] + config.get("args", [])
     timeout = config.get("timeout", 30)
+    stdin_file = None
+    if config.get("stdin_file") and bench_data.exists():
+        stdin_file = bench_data / config["stdin_file"]
 
-    try:
-        start = time.time()
-        proc = subprocess.run(
-            cmd, capture_output=True, timeout=timeout,
-            cwd=run_dir, stdin=stdin_fh,
-        )
-        elapsed = time.time() - start
-        if proc.returncode == 0:
-            return elapsed
-    except subprocess.TimeoutExpired:
-        pass
-    finally:
-        if stdin_fh:
-            stdin_fh.close()
-    return None
+    timings = []
+    for _ in range(num_runs):
+        stdin_fh = None
+        try:
+            if stdin_file and stdin_file.exists():
+                stdin_fh = open(str(stdin_file), "r")
+            start = time.time()
+            proc = subprocess.run(
+                cmd, capture_output=True, timeout=timeout,
+                cwd=run_dir, stdin=stdin_fh,
+            )
+            elapsed = time.time() - start
+            if proc.returncode == 0:
+                timings.append(elapsed)
+        except subprocess.TimeoutExpired:
+            pass
+        finally:
+            if stdin_fh:
+                stdin_fh.close()
+
+    if not timings:
+        return None, []
+    timings.sort()
+    return timings[len(timings) // 2], timings
 
 
 def compile_benchmark(bc_path, opt_path, llc_path, tmp_dir, data_dir,
                       evolved_opt_flags=None, evolved_llc_flags=None,
-                      opt_timeout=120):
+                      opt_timeout=120, enable_stats=False,
+                      enable_perf=False, enable_remarks=False):
     """Compile a .bc file through ``opt -> llc -> gcc``.
 
     Callers pass evolved flags to *opt*, *llc*, or both:
@@ -304,15 +613,27 @@ def compile_benchmark(bc_path, opt_path, llc_path, tmp_dir, data_dir,
     - Inlining: ``evolved_opt_flags=["-use-evolved-inline-cost", ...]``
     - RegAlloc: ``evolved_llc_flags=["-use-evolved-regalloc-priority", ...]``
 
-    Returns ``(text_size, binary_size, runtime, error)`` 4-tuple.
+    Returns a dict with keys: ``text_size``, ``binary_size``, ``runtime``,
+    ``timings``, ``opt_stats``, ``llc_stats``, ``perf_counters``, ``error``.
     """
     name = bc_path.stem
     opt_bc = os.path.join(tmp_dir, f"{name}_opt.bc")
     obj_file = os.path.join(tmp_dir, f"{name}.o")
     binary = os.path.join(tmp_dir, name)
 
+    def _err(msg):
+        return {"text_size": None, "binary_size": None, "runtime": None,
+                "timings": [], "opt_stats": {}, "llc_stats": {},
+                "perf_counters": {}, "opt_remarks": {}, "error": msg}
+
     # opt pass
     opt_cmd = [str(opt_path), "-O2"]
+    if enable_stats:
+        opt_cmd.append("-stats")
+    remarks_file = None
+    if enable_remarks:
+        remarks_file = os.path.join(tmp_dir, f"{name}_remarks.yaml")
+        opt_cmd.append(f"-pass-remarks-output={remarks_file}")
     if evolved_opt_flags:
         opt_cmd.extend(evolved_opt_flags)
     opt_cmd += [str(bc_path), "-o", opt_bc]
@@ -322,12 +643,17 @@ def compile_benchmark(bc_path, opt_path, llc_path, tmp_dir, data_dir,
             opt_cmd, capture_output=True, text=True, timeout=opt_timeout,
         )
     except subprocess.TimeoutExpired:
-        return None, None, None, f"opt timed out ({opt_timeout}s)"
+        return _err(f"opt timed out ({opt_timeout}s)")
     if proc.returncode != 0:
-        return None, None, None, proc.stderr[:500]
+        return _err(proc.stderr[:500])
+
+    opt_stats = parse_stats(proc.stderr) if enable_stats else {}
+    opt_remarks = parse_remarks(remarks_file) if remarks_file else {}
 
     # llc: bitcode -> object
     llc_cmd = [str(llc_path), "-O2", "-filetype=obj", "-relocation-model=pic"]
+    if enable_stats:
+        llc_cmd.append("-stats")
     if evolved_llc_flags:
         llc_cmd.extend(evolved_llc_flags)
     llc_cmd += [opt_bc, "-o", obj_file]
@@ -337,9 +663,11 @@ def compile_benchmark(bc_path, opt_path, llc_path, tmp_dir, data_dir,
             llc_cmd, capture_output=True, text=True, timeout=opt_timeout,
         )
     except subprocess.TimeoutExpired:
-        return None, None, None, f"llc timed out ({opt_timeout}s)"
+        return _err(f"llc timed out ({opt_timeout}s)")
     if proc.returncode != 0:
-        return None, None, None, proc.stderr[:500]
+        return _err(proc.stderr[:500])
+
+    llc_stats = parse_stats(proc.stderr) if enable_stats else {}
 
     text_size = get_text_size(obj_file)
 
@@ -351,13 +679,35 @@ def compile_benchmark(bc_path, opt_path, llc_path, tmp_dir, data_dir,
             gcc_cmd, capture_output=True, text=True, timeout=60,
         )
     except subprocess.TimeoutExpired:
-        return text_size, None, None, "link timed out"
+        return {"text_size": text_size, "binary_size": None, "runtime": None,
+                "timings": [], "opt_stats": opt_stats, "llc_stats": llc_stats,
+                "perf_counters": {}, "opt_remarks": opt_remarks,
+                "error": "link timed out"}
     if proc.returncode != 0:
-        return text_size, None, None, f"link failed: {proc.stderr[:200]}"
+        return {"text_size": text_size, "binary_size": None, "runtime": None,
+                "timings": [], "opt_stats": opt_stats, "llc_stats": llc_stats,
+                "perf_counters": {}, "opt_remarks": opt_remarks,
+                "error": f"link failed: {proc.stderr[:200]}"}
 
     binary_size = os.path.getsize(binary)
-    runtime = run_benchmark(name, binary, tmp_dir, data_dir)
-    return text_size, binary_size, runtime, None
+    runtime, timings = run_benchmark(name, binary, tmp_dir, data_dir)
+
+    # Optional perf stat (single run, deterministic counters)
+    perf_counters = {}
+    if enable_perf and runtime is not None:
+        perf_counters = run_perf_stat(name, binary, tmp_dir, data_dir)
+
+    return {
+        "text_size": text_size,
+        "binary_size": binary_size,
+        "runtime": runtime,
+        "timings": timings,
+        "opt_stats": opt_stats,
+        "llc_stats": llc_stats,
+        "perf_counters": perf_counters,
+        "opt_remarks": opt_remarks,
+        "error": None,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -423,10 +773,14 @@ def load_baseline(config: EvalConfig):
     with tempfile.TemporaryDirectory(prefix="evolve_baseline_") as tmp_dir:
         for bc in benchmarks:
             print(f"  Baseline: {bc.stem}...", end=" ", flush=True)
-            text_size, binary_size, runtime, err = compile_benchmark(
+            r = compile_benchmark(
                 bc, opt_path, llc_path, tmp_dir, config.data_dir,
                 opt_timeout=config.opt_timeout,
             )
+            text_size = r.get("text_size")
+            binary_size = r.get("binary_size")
+            runtime = r.get("runtime")
+            err = r.get("error")
             if err:
                 print(f"ERROR: {err}")
             elif text_size is not None:
@@ -455,14 +809,16 @@ def load_baseline(config: EvalConfig):
 
 def eval_benchmarks(benchmarks, opt_path, llc_path, baseline, tmp_dir,
                     data_dir, score_fn, evolved_opt_flags=None,
-                    evolved_llc_flags=None, opt_timeout=120):
+                    evolved_llc_flags=None, opt_timeout=120,
+                    enable_stats=False, enable_perf=False,
+                    enable_remarks=False):
     """Compile and score benchmarks.
 
     *score_fn(total_binary, baseline_total_binary, speedups)* computes the
     task-specific score from aggregate measurements.
 
     Returns ``(score, result_dict)`` where *result_dict* contains per-benchmark
-    details plus aggregate totals.
+    details (including stats, timings, perf counters) plus aggregate totals.
     """
     total_binary = 0
     baseline_total_binary = 0
@@ -473,17 +829,30 @@ def eval_benchmarks(benchmarks, opt_path, llc_path, baseline, tmp_dir,
     errors = []
 
     for bc in benchmarks:
-        text_size, binary_size, runtime, err = compile_benchmark(
+        r = compile_benchmark(
             bc, opt_path, llc_path, tmp_dir, data_dir,
             evolved_opt_flags=evolved_opt_flags,
             evolved_llc_flags=evolved_llc_flags,
             opt_timeout=opt_timeout,
+            enable_stats=enable_stats,
+            enable_perf=enable_perf,
+            enable_remarks=enable_remarks,
         )
         bl = baseline.get(bc.name, {})
+        text_size = r.get("text_size")
+        binary_size = r.get("binary_size")
+        runtime = r.get("runtime")
+        err = r.get("error")
+
         info = {
             "text_size": text_size,
             "binary_size": binary_size,
             "runtime": runtime,
+            "timings": r.get("timings", []),
+            "opt_stats": r.get("opt_stats", {}),
+            "llc_stats": r.get("llc_stats", {}),
+            "perf_counters": r.get("perf_counters", {}),
+            "opt_remarks": r.get("opt_remarks", {}),
         }
 
         if err:
@@ -587,3 +956,421 @@ def optuna_tune(opt_path, llc_path, benchmarks, baseline, n_trials,
     best_params = study.best_params
     best_flags = [f"-{k}={v}" for k, v in best_params.items()]
     return study.best_value, best_params, best_flags
+
+
+# ---------------------------------------------------------------------------
+# ASI — Actionable Side Information (GEPA-style text gradients)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ScoreFormula:
+    """Describes how a task's score is computed from metrics.
+
+    Used by ``generate_asi()`` to decompose the score into its components so
+    the LLM can understand what drives the fitness function.
+    """
+    speedup_weight: float = 5.0   # multiplier on speedup_pct
+    binary_weight: float = 1.0    # multiplier on binary_reduction_pct
+    description: str = "5 * speedup% + binary_reduction%"
+
+
+def _classify_signal(info, bl):
+    """Classify a benchmark result's signal reliability.
+
+    Returns a human-readable label:
+    - ``UNRELIABLE (<10ms)`` — baseline runtime too short for stable measurement
+    - ``HIGH_VARIANCE (<100ms)`` — baseline runtime marginal
+    - ``REAL (code changed)`` — text section changed AND meaningful speedup
+    - ``NOISE (same code)`` — speedup without code change (measurement noise)
+    - ``MARGINAL`` — small or no change
+    """
+    bl_rt = bl.get("runtime")
+    speedup = info.get("speedup", 1.0)
+    text_pct = abs(info.get("text_reduction_pct", 0))
+    speedup_delta = abs(speedup - 1.0) * 100 if speedup else 0
+
+    if bl_rt is not None and bl_rt < 0.01:
+        return "UNRELIABLE (<10ms)"
+    if bl_rt is not None and bl_rt < 0.1:
+        return "HIGH_VARIANCE (<100ms)"
+    if text_pct > 0.01 and speedup_delta > 1:
+        return "REAL (code changed)"
+    if text_pct <= 0.01 and speedup_delta > 1:
+        return "NOISE (same code)"
+    return "MARGINAL"
+
+
+def _fmt_runtime(seconds):
+    """Format a runtime value for display."""
+    if seconds is None:
+        return "N/A"
+    if seconds < 1.0:
+        return f"{seconds * 1000:.1f}ms"
+    return f"{seconds:.1f}s"
+
+
+def generate_asi(score, result_dict, baseline, baseline_stats=None,
+                 formula=None, baseline_remarks=None):
+    """Generate Actionable Side Information markdown narrative.
+
+    Produces structured diagnostic feedback (GEPA-style "text gradients")
+    with up to five tiers of analysis:
+
+    - **Tier 1** — Score decomposition + per-benchmark signal classification
+    - **Tier 2** — Compiler statistics delta vs baseline (requires *baseline_stats*)
+    - **Tier 3** — Runtime variance from individual timings
+    - **Tier 4** — Hardware perf counters (if collected)
+    - **Tier 5** — Optimization decision changes (requires *baseline_remarks*)
+    """
+    if formula is None:
+        formula = ScoreFormula()
+    details = result_dict.get("details", {})
+    lines = []
+
+    # ---- Tier 1: Score Decomposition ----
+    speedups = result_dict.get("speedups", [])
+    avg_speedup = sum(speedups) / len(speedups) if speedups else 0.0
+    speedup_pct = (avg_speedup - 1.0) * 100 if avg_speedup > 0 else 0.0
+
+    total_binary = result_dict.get("total_binary", 0)
+    bl_total_binary = result_dict.get("baseline_total_binary", 0)
+    binary_pct = (
+        100.0 * (bl_total_binary - total_binary) / bl_total_binary
+        if bl_total_binary > 0 else 0.0
+    )
+
+    lines.append(f"## Performance Analysis (Score: {score})")
+    lines.append("")
+    lines.append("### Score Decomposition")
+    lines.append(f"Formula: {formula.description}")
+    lines.append(
+        f"- Avg speedup: {avg_speedup:.4f}x ({speedup_pct:+.2f}%) "
+        f"x {formula.speedup_weight} = {formula.speedup_weight * speedup_pct:.2f}"
+    )
+    lines.append(
+        f"- Binary reduction: {binary_pct:.2f}% "
+        f"x {formula.binary_weight} = {formula.binary_weight * binary_pct:.2f}"
+    )
+    lines.append("")
+
+    # Per-benchmark table
+    lines.append("### Per-Benchmark Results")
+    lines.append(
+        "| Benchmark | Speedup | Text D | Binary D | Baseline RT | Signal |"
+    )
+    lines.append(
+        "|-----------|---------|--------|----------|-------------|--------|"
+    )
+
+    score_contributions = {}
+    for bname in sorted(details.keys()):
+        info = details[bname]
+        bl = baseline.get(bname, {})
+
+        speedup = info.get("speedup")
+        text_delta = info.get("text_reduction_pct", 0)
+        binary_delta = info.get("binary_reduction_pct", 0)
+        bl_rt = bl.get("runtime")
+        signal = _classify_signal(info, bl)
+
+        sp_str = f"{(speedup - 1) * 100:+.1f}%" if speedup else "N/A"
+        text_str = f"{text_delta:+.2f}%"
+        binary_str = f"{binary_delta:+.2f}%"
+        rt_str = _fmt_runtime(bl_rt)
+        short_name = bname.replace(".bc", "")
+
+        lines.append(
+            f"| {short_name} | {sp_str} | {text_str} | {binary_str} "
+            f"| {rt_str} | {signal} |"
+        )
+
+        # Track score contribution per benchmark
+        if speedup and len(details) > 0:
+            contrib = (
+                (speedup - 1.0) * 100
+                * formula.speedup_weight
+                / len(details)
+            )
+            score_contributions[bname] = contrib
+
+    lines.append("")
+
+    # Key observations
+    if score_contributions:
+        total_sp_score = sum(score_contributions.values())
+        if total_sp_score != 0:
+            top = max(score_contributions, key=lambda k: abs(score_contributions[k]))
+            top_contrib = score_contributions[top]
+            top_pct = abs(top_contrib / total_sp_score * 100)
+            top_signal = _classify_signal(details[top], baseline.get(top, {}))
+            lines.append("### Key Observations")
+            short = top.replace(".bc", "")
+            lines.append(
+                f"- {short} contributes {top_pct:.0f}% of speedup score"
+                f" -- {top_signal}"
+            )
+
+        # Summarize real improvements
+        real_gains = [
+            (n, details[n].get("speedup", 1.0))
+            for n in details
+            if _classify_signal(details[n], baseline.get(n, {})).startswith("REAL")
+            and details[n].get("speedup", 1.0) > 1.0
+        ]
+        if real_gains:
+            real_avg = (
+                sum(s - 1.0 for _, s in real_gains) / len(real_gains) * 100
+            )
+            lines.append(
+                f"- Real avg speedup (code-changed benchmarks): {real_avg:+.1f}%"
+            )
+        lines.append("")
+
+    # ---- Tier 2: Compiler Statistics Delta ----
+    if baseline_stats:
+        has_any_stats = any(
+            details[b].get("opt_stats") or details[b].get("llc_stats")
+            for b in details
+        )
+        if has_any_stats:
+            lines.append("### Compiler Statistics Delta")
+            for bname in sorted(details.keys()):
+                info = details[bname]
+                bl_stats = baseline_stats.get(bname, {})
+
+                evolved_opt = info.get("opt_stats", {})
+                evolved_llc = info.get("llc_stats", {})
+                bl_opt = bl_stats.get("opt_stats", {})
+                bl_llc = bl_stats.get("llc_stats", {})
+
+                # Combine and find interesting deltas
+                deltas = []
+                for key in set(list(evolved_opt.keys()) + list(bl_opt.keys())):
+                    ev = evolved_opt.get(key, 0)
+                    bl_v = bl_opt.get(key, 0)
+                    if bl_v != 0 and ev != bl_v:
+                        pct = (ev - bl_v) / bl_v * 100
+                        deltas.append((key, bl_v, ev, ev - bl_v, pct))
+                for key in set(list(evolved_llc.keys()) + list(bl_llc.keys())):
+                    ev = evolved_llc.get(key, 0)
+                    bl_v = bl_llc.get(key, 0)
+                    if bl_v != 0 and ev != bl_v:
+                        pct = (ev - bl_v) / bl_v * 100
+                        deltas.append((key, bl_v, ev, ev - bl_v, pct))
+
+                if deltas:
+                    deltas.sort(key=lambda x: abs(x[4]), reverse=True)
+                    short = bname.replace(".bc", "")
+                    lines.append(f"\n**{short}** (top changes):")
+                    lines.append("| Metric | Baseline | Evolved | Delta |")
+                    lines.append("|--------|----------|---------|-------|")
+                    for key, bl_v, ev, delta, pct in deltas[:8]:
+                        lines.append(
+                            f"| {key} | {bl_v:,} | {ev:,} "
+                            f"| {delta:+,} ({pct:+.1f}%) |"
+                        )
+            lines.append("")
+
+    # ---- Tier 3: Runtime Variance ----
+    has_timings = any(
+        len(details[b].get("timings", [])) > 1 for b in details
+    )
+    if has_timings:
+        lines.append("### Runtime Variance")
+        lines.append("| Benchmark | Timings | CoV | Signal |")
+        lines.append("|-----------|---------|-----|--------|")
+        for bname in sorted(details.keys()):
+            timings = details[bname].get("timings", [])
+            if len(timings) < 2:
+                continue
+            mean = sum(timings) / len(timings)
+            variance = sum((t - mean) ** 2 for t in timings) / (len(timings) - 1)
+            stdev = math.sqrt(variance)
+            cov = (stdev / mean * 100) if mean > 0 else 0
+            signal = (
+                "STABLE" if cov < 5 else ("MODERATE" if cov < 15 else "NOISY")
+            )
+            timing_strs = ", ".join(f"{t:.4f}" for t in timings[:5])
+            short = bname.replace(".bc", "")
+            lines.append(f"| {short} | {timing_strs} | {cov:.1f}% | {signal} |")
+        lines.append("")
+
+    # ---- Tier 4: Hardware Counters ----
+    has_perf = any(details[b].get("perf_counters") for b in details)
+    if has_perf:
+        lines.append("### Hardware Counters")
+        for bname in sorted(details.keys()):
+            perf = details[bname].get("perf_counters", {})
+            if not perf:
+                continue
+            short = bname.replace(".bc", "")
+            lines.append(f"\n**{short}**:")
+            lines.append("| Counter | Value |")
+            lines.append("|---------|-------|")
+            for counter, value in sorted(perf.items()):
+                lines.append(f"| {counter} | {value:,} |")
+        lines.append("")
+
+    # ---- Tier 5: Optimization Decision Changes ----
+    if baseline_remarks:
+        has_remarks = any(details[b].get("opt_remarks") for b in details)
+        if has_remarks:
+            lines.append("### Optimization Decisions")
+            for bname in sorted(details.keys()):
+                evolved_rm = details[bname].get("opt_remarks", {})
+                bl_rm = baseline_remarks.get(bname, {})
+                if not evolved_rm and not bl_rm:
+                    continue
+
+                summary = summarize_remarks(evolved_rm, bl_rm)
+                flipped = summary.get("flipped", [])
+                if not flipped and summary["evolved_passed"] == summary["baseline_passed"]:
+                    continue
+
+                short = bname.replace(".bc", "")
+                n_flipped = len(flipped)
+                newly_passed = sum(
+                    1 for f in flipped if f["direction"] == "newly_passed"
+                )
+                newly_missed = sum(
+                    1 for f in flipped if f["direction"] == "newly_missed"
+                )
+                lines.append(
+                    f"\n**{short}** ({n_flipped} decisions changed vs baseline):"
+                )
+                if newly_passed:
+                    lines.append(f"- {newly_passed} newly passed (were rejected)")
+                if newly_missed:
+                    lines.append(f"- {newly_missed} newly rejected (were passed)")
+
+                # Show top flipped decisions with cost/threshold info
+                top_flips = flipped[:5]
+                if top_flips:
+                    lines.append("")
+                    lines.append(
+                        "| Function | Callee | Direction | "
+                        "BL Cost/Thresh | Ev Cost/Thresh |"
+                    )
+                    lines.append(
+                        "|----------|--------|-----------|"
+                        "----------------|----------------|"
+                    )
+                    for f in top_flips:
+                        direction = (
+                            "now passed" if f["direction"] == "newly_passed"
+                            else "now rejected"
+                        )
+                        bl_ct = (
+                            f"{f['baseline_cost']}/{f['baseline_threshold']}"
+                            if f["baseline_cost"] else "N/A"
+                        )
+                        ev_ct = (
+                            f"{f['evolved_cost']}/{f['evolved_threshold']}"
+                            if f["evolved_cost"] else "N/A"
+                        )
+                        func = f["function"][:30]
+                        callee = f["callee"][:20]
+                        lines.append(
+                            f"| {func} | {callee} | {direction} "
+                            f"| {bl_ct} | {ev_ct} |"
+                        )
+            lines.append("")
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Baseline stats caching
+# ---------------------------------------------------------------------------
+
+def load_baseline_stats(config):
+    """Load or compute baseline compiler stats (``opt``/``llc -stats`` output).
+
+    Stats are cached in ``baseline_stats.json`` alongside the baseline file.
+    Re-generates when the file is missing.
+    """
+    stats_path = Path(config.baseline_file).parent / "baseline_stats.json"
+    if stats_path.exists():
+        with open(stats_path) as f:
+            return json.load(f)
+
+    # Compile each benchmark with -stats (no evolved flags) to collect baseline
+    opt_path = os.path.join(config.build_dir, "bin", "opt")
+    llc_path = os.path.join(config.build_dir, "bin", "llc")
+    benchmarks = find_benchmarks(Path(config.testsuite_dir))
+
+    if not benchmarks:
+        return {}
+
+    baseline_stats = {}
+    with tempfile.TemporaryDirectory(prefix="evolve_blstats_") as tmp_dir:
+        for bc in benchmarks:
+            print(f"  Baseline stats: {bc.stem}...", end=" ", flush=True)
+            r = compile_benchmark(
+                bc, opt_path, llc_path, tmp_dir, config.data_dir,
+                opt_timeout=config.opt_timeout, enable_stats=True,
+            )
+            if r.get("error"):
+                print(f"ERROR: {r['error']}")
+            else:
+                baseline_stats[bc.name] = {
+                    "opt_stats": r.get("opt_stats", {}),
+                    "llc_stats": r.get("llc_stats", {}),
+                }
+                opt_n = len(r.get("opt_stats", {}))
+                llc_n = len(r.get("llc_stats", {}))
+                print(f"opt: {opt_n} stats, llc: {llc_n} stats")
+
+    try:
+        os.makedirs(stats_path.parent, exist_ok=True)
+        with open(stats_path, "w") as f:
+            json.dump(baseline_stats, f, indent=2)
+        print(f"  Baseline stats saved to {stats_path}")
+    except OSError:
+        pass
+
+    return baseline_stats
+
+
+def load_baseline_remarks(config):
+    """Load or compute baseline optimization remarks.
+
+    Remarks are cached in ``baseline_remarks.json`` alongside the baseline
+    file.  Re-generates when the file is missing.  Only called when
+    ``config.enable_remarks`` is True.
+    """
+    remarks_path = Path(config.baseline_file).parent / "baseline_remarks.json"
+    if remarks_path.exists():
+        with open(remarks_path) as f:
+            return json.load(f)
+
+    opt_path = os.path.join(config.build_dir, "bin", "opt")
+    llc_path = os.path.join(config.build_dir, "bin", "llc")
+    benchmarks = find_benchmarks(Path(config.testsuite_dir))
+
+    if not benchmarks:
+        return {}
+
+    baseline_remarks = {}
+    with tempfile.TemporaryDirectory(prefix="evolve_blremarks_") as tmp_dir:
+        for bc in benchmarks:
+            print(f"  Baseline remarks: {bc.stem}...", end=" ", flush=True)
+            r = compile_benchmark(
+                bc, opt_path, llc_path, tmp_dir, config.data_dir,
+                opt_timeout=config.opt_timeout, enable_remarks=True,
+            )
+            remarks = r.get("opt_remarks", {})
+            n_passed = len(remarks.get("passed", []))
+            n_missed = len(remarks.get("missed", []))
+            baseline_remarks[bc.name] = remarks
+            print(f"passed={n_passed}, missed={n_missed}")
+
+    try:
+        os.makedirs(remarks_path.parent, exist_ok=True)
+        with open(remarks_path, "w") as f:
+            json.dump(baseline_remarks, f)
+        print(f"  Baseline remarks saved to {remarks_path}")
+    except OSError:
+        pass
+
+    return baseline_remarks

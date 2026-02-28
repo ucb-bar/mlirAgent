@@ -1,4 +1,4 @@
-"""Evaluator for LLVM inlining heuristic evolution.
+"""Evaluator for LLVM loop unrolling heuristic evolution.
 
 Called by OpenEvolve as: python evaluate.py <program_path>
 
@@ -6,12 +6,13 @@ Pipeline:
 1. Patch evolved C++ heuristic into LLVM source tree
 2. Rebuild opt incrementally (ninja)
 3. For each CTMark benchmark .bc file:
-   a. opt -O2 -use-evolved-inline-cost bench.bc -o bench_opt.bc
+   a. opt -O2 -use-evolved-loop-unroll bench.bc -o bench_opt.bc
    b. llc -O2 -filetype=obj -relocation-model=pic bench_opt.bc -o bench.o
    c. gcc bench.o -o bench -lm -lpthread -ldl [-lstdc++ for C++]
-   d. Measure .text section size and linked binary size
+   d. Measure linked binary size
    e. Run benchmark with reference inputs and measure wall-clock time
-4. Score = linked binary size reduction % vs baseline (Magellan-comparable)
+4. Score = 5.0 * speedup_pct + binary_reduction_pct
+   (loop unrolling is runtime-focused; binary growth expected, penalized at 1/5th)
 """
 
 import json
@@ -44,27 +45,31 @@ try:
 except ImportError:
     EvaluationResult = None
 
+_EVAL_DIR = Path(__file__).resolve().parent
+
 
 def _score(total_binary, baseline_total_binary, speedups):
-    """Inlining score: binary reduction % + speedup bonus."""
+    """Loop unroll score: 5x speedup + 1x binary reduction."""
     binary_pct = (
         100.0 * (baseline_total_binary - total_binary) / baseline_total_binary
         if baseline_total_binary > 0 else 0.0
     )
     avg_speedup = sum(speedups) / len(speedups) if speedups else 0.0
-    perf_bonus = (avg_speedup - 1.0) * 10 if avg_speedup > 0 else 0.0
-    return round(binary_pct + perf_bonus, 4)
+    speedup_pct = (avg_speedup - 1.0) * 100 if avg_speedup > 0 else 0.0
+    return round(5.0 * speedup_pct + binary_pct, 4)
 
 
 def evaluate(program_path: str, config: EvalConfig = None) -> dict:
-    """Evaluate an evolved LLVM inlining heuristic.
+    """Evaluate an evolved LLVM loop unrolling heuristic.
 
-    Score = linked binary size reduction % vs baseline (higher = better).
-    If [hyperparam] annotations are present and optuna_trials > 0,
-    runs Optuna inner-loop to tune numeric knobs before final evaluation.
+    Score = 5x runtime speedup % + 1x binary size reduction % vs baseline.
+    Loop unrolling primarily affects runtime performance; binary size may grow.
     """
     if config is None:
-        config = EvalConfig.from_env("llvm/lib/Analysis/EvolvedInlineCost.cpp")
+        config = EvalConfig.from_env(
+            "llvm/lib/Transforms/Scalar/EvolvedLoopUnroll.cpp",
+            baseline_file=str(_EVAL_DIR / "baseline_unroll.json"),
+        )
 
     if not config.llvm_src or not config.build_dir:
         return {
@@ -76,9 +81,7 @@ def evaluate(program_path: str, config: EvalConfig = None) -> dict:
         "combined_score": 0.0,
         "build_success": False,
         "build_time": 0.0,
-        "total_text_size": 0,
         "total_binary_size": 0,
-        "size_reduction_pct": 0.0,
         "binary_reduction_pct": 0.0,
         "avg_speedup": 0.0,
         "benchmark_details": {},
@@ -106,18 +109,17 @@ def evaluate(program_path: str, config: EvalConfig = None) -> dict:
 
         if not benchmarks:
             result["error"] = "No benchmark .bc files found in testsuite/"
-            result["combined_score"] = 0.0
             return result
 
         # Extract hyperparams and optionally run Optuna
         with open(program_path) as f:
             hyperparams = extract_hyperparams(f.read())
 
-        evolved_opt_flags = ["-use-evolved-inline-cost"]
+        evolved_opt_flags = ["-use-evolved-loop-unroll"]
 
         if hyperparams and config.optuna_trials > 0:
             print(f"  Optuna: tuning {len(hyperparams)} hyperparams "
-                  f"({config.optuna_trials} trials on {config.optuna_subset})...")
+                  f"({config.optuna_trials} trials)...")
             tune_start = time.time()
             best_sub, best_params, extra_flags = optuna_tune(
                 opt_path, llc_path, benchmarks, baseline,
@@ -138,8 +140,8 @@ def evaluate(program_path: str, config: EvalConfig = None) -> dict:
             result["optuna_trials"] = 0
             result["tuned_params"] = {}
 
-        # Final evaluation on ALL benchmarks
-        with tempfile.TemporaryDirectory(prefix="evolve_eval_") as tmp_dir:
+        # Final evaluation on all benchmarks
+        with tempfile.TemporaryDirectory(prefix="unroll_eval_") as tmp_dir:
             score, ev = eval_benchmarks(
                 benchmarks, opt_path, llc_path, baseline, tmp_dir,
                 config.data_dir, _score,
@@ -152,14 +154,8 @@ def evaluate(program_path: str, config: EvalConfig = None) -> dict:
 
         result["combined_score"] = score
         result["benchmark_details"] = ev["details"]
-        result["total_text_size"] = ev["total_text"]
         result["total_binary_size"] = ev["total_binary"]
 
-        if ev["baseline_total_text"] > 0:
-            result["size_reduction_pct"] = round(
-                100.0 * (ev["baseline_total_text"] - ev["total_text"])
-                / ev["baseline_total_text"], 4
-            )
         if ev["baseline_total_binary"] > 0:
             result["binary_reduction_pct"] = round(
                 100.0 * (ev["baseline_total_binary"] - ev["total_binary"])
@@ -182,9 +178,9 @@ def evaluate(program_path: str, config: EvalConfig = None) -> dict:
         asi = generate_asi(
             score, ev, baseline, baseline_stats=baseline_stats,
             formula=ScoreFormula(
-                speedup_weight=0.1,
+                speedup_weight=5.0,
                 binary_weight=1.0,
-                description="binary_reduction% + (avg_speedup - 1) x 10",
+                description="5 x speedup% + binary_reduction%",
             ),
             baseline_remarks=bl_remarks,
         )
@@ -202,12 +198,13 @@ def evaluate(program_path: str, config: EvalConfig = None) -> dict:
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="Evaluate LLVM inlining heuristic")
+    parser = argparse.ArgumentParser(description="Evaluate LLVM loop unroll heuristic")
     parser.add_argument("program_path", help="Path to evolved C++ source")
     EvalConfig.add_arguments(parser)
     args = parser.parse_args()
     config = EvalConfig.from_args(
-        args, "llvm/lib/Analysis/EvolvedInlineCost.cpp"
+        args, "llvm/lib/Transforms/Scalar/EvolvedLoopUnroll.cpp",
+        baseline_file=str(_EVAL_DIR / "baseline_unroll.json"),
     )
     metrics = evaluate(args.program_path, config=config)
     print(json.dumps(metrics, indent=2))
