@@ -1,0 +1,4 @@
+interface:
+  display_name: "MLIR Evolve"
+  short_description: "Tooling + workflows for mlirEvolve"
+  default_prompt: "Use $mlir-evolve to plan or implement tools in this repo."
