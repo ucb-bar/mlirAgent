@@ -1,16 +1,18 @@
+import os
+
+import numpy as np
+import onnx
+import onnxruntime
 import torch
 import torch.nn as nn
-import os
-import onnx
-import numpy as np
-import onnxruntime
-from onnxruntime.quantization import quantize_static, QuantType, CalibrationDataReader
 from onnx.external_data_helper import convert_model_to_external_data
+from onnxruntime.quantization import CalibrationDataReader, QuantType, quantize_static
+
 
 # --- 1. Define the Hybrid Network ---
 class SimpleHybridNet(nn.Module):
     def __init__(self, input_channels=3, img_size=32, num_classes=10):
-        super(SimpleHybridNet, self).__init__()
+        super().__init__()
         self.conv = nn.Conv2d(in_channels=input_channels, out_channels=16, kernel_size=3, stride=2, padding=1)
         self.relu = nn.ReLU()
         

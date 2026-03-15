@@ -2,7 +2,7 @@
 
 # --- 1. Configuration ---
 # Update this to match the name of the .mlir file you generated in the previous step
-MODEL_NAME="simple_matmul_relu_int8_sym"
+MODEL_NAME="quantized_matmul"
 # Assumes you ran: iree-import-onnx ... -o compilation_simple_matmul_relu/simple_matmul_relu.mlir
 INPUT_FILE="compilation_${MODEL_NAME}/${MODEL_NAME}.mlir"
 
@@ -32,11 +32,12 @@ iree-compile "${INPUT_FILE}" \
   -o "${OUTPUT_VMFB}" \
   \
   --iree-hal-target-backends=llvm-cpu \
+  --iree-llvmcpu-target-cpu=spacemit-x60 \
   --iree-llvmcpu-target-triple=riscv64-unknown-linux-gnu \
-  --iree-llvmcpu-target-cpu-features="+m,+a,+f,+d,+v,+zvl512b,+zvfh,+zvbb" \
+  --iree-llvmcpu-target-cpu-features="+m,+a,+f,+d,+v,+zvl256b,+zvfh,+zvbb,+xsmtvdot" \
   --iree-llvmcpu-target-abi=lp64d \
   --iree-dispatch-creation-data-tiling \
-  --iree-llvmcpu-enable-ukernels="all" \
+  --iree-llvmcpu-enable-ukernels="none" \
   --iree-opt-level=O3 \
   -mlir-disable-threading \
   \

@@ -1,16 +1,18 @@
+import os
+
+import numpy as np
+import onnx
+import onnxruntime
 import torch
 import torch.nn as nn
-import os
-import onnx
-import numpy as np
-import onnxruntime
-from onnxruntime.quantization import quantize_static, QuantType, CalibrationDataReader
 from onnx.external_data_helper import convert_model_to_external_data
+from onnxruntime.quantization import CalibrationDataReader, QuantType, quantize_static
+
 
 # --- 1. Define the Simple MatMul Network ---
 class SimpleMatMulNet(nn.Module):
     def __init__(self, input_dim=128, output_dim=32):
-        super(SimpleMatMulNet, self).__init__()
+        super().__init__()
         # nn.Linear performs the MatMul + Add (bias)
         self.fc = nn.Linear(input_dim, output_dim)
         self.relu = nn.ReLU()
