@@ -1,0 +1,56 @@
+# Save the plan to a text file
+plan_content = """# Phase 2: Hybrid Knowledge Graph Architecture & Implementation Plan
+
+## 1. Core Philosophy: "Compiler Introspection"
+Instead of parsing text with regex, we query the compilers (Clang, TableGen, CMake) to dump their internal truth. This ensures 100% accuracy for the Agent.
+
+## 2. Ingestion Stack (The "Reading" Tools)
+
+### A. C++ Code (Implemented)
+* **Tool:** `scip-clang` (Sourcegraph)
+* **Output:** `.scip` (Protobuf binary)
+* **Graph Role:** Provides the detailed code graph (Classes, Functions, Calls, References).
+* **Status:** ✅ Done. `scripts/ingest_codegraph.py` is working.
+
+### B. MLIR Dialects (High Priority Todo)
+* **Tool:** `iree-tblgen`
+* **Flag:** `--gen-dialect-json`
+* **Mechanism:** Runs the TableGen compiler to parse `.td` files and dump a JSON representation of Ops, Attributes, and Types.
+* **Graph Role:** Domain Knowledge. Links abstract Ops (`linalg.matmul`) to their definition files.
+* **Action:** Implement `scripts/ingest_dialects.py`.
+
+### C. Build System (High Priority Todo)
+* **Tool:** `cmake`
+* **Feature:** CMake File API (v1)
+* **Mechanism:** Inject a query file into `.cmake/api/v1/query`, run cmake, and parse the resulting JSON reply.
+* **Graph Role:** Physics of the build. Maps Source Files -> Build Targets -> Link Dependencies.
+* **Action:** Implement `scripts/ingest_build.py` using the File API (not regex).
+
+## 3. The Unified Graph Schema (Neo4j)
+
+The Agent will see a unified graph with these connected layers:
+
+1.  **Build Layer:** `(:BuildTarget)` nodes linked by `[:LINKS_TO]`.
+2.  **File Layer:** `(:File)` nodes linked to Targets via `[:COMPILES]`.
+3.  **Code Layer:** `(:Class)`, `(:Function)` nodes inside Files.
+4.  **Semantic Layer:** `(:Dialect)`, `(:Op)` nodes linked to defining Files.
+
+## 4. Future: "Deterministic Editing" Tools (Phase 3)
+
+Once the graph is built, we need specialized tools to modify it safely.
+
+* **Bazel (`BUILD`):** Use `buildozer` (CLI wrapper) for guaranteed safe edits.
+* **CMake (`CMakeLists.txt`):** Use `ast-grep` with CMake language support to structurally edit lists.
+* **TableGen (`.td`):** Use Aider (LLM) wrapped in a "Verify Loop" that runs `iree-tblgen` immediately to check syntax.
+* **C++:** Use `ast-grep` for precise refactoring (renaming, signature changes).
+
+## 5. Next Immediate Steps
+1.  [ ] Create `scripts/ingest_dialects.py` to index `.td` files.
+2.  [ ] Create `scripts/ingest_build.py` to index CMake structure.
+3.  [ ] Update `src/mlirAgent/tools/retriever.py` to query this new unified graph.
+"""
+
+with open("phase2_knowledge_graph_plan.txt", "w") as f:
+    f.write(plan_content)
+
+print("✅ Plan saved to 'phase2_knowledge_graph_plan.txt'")
