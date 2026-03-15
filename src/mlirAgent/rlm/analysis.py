@@ -1,9 +1,11 @@
 # File: src/mlirAgent/rlm/analysis.py
-import os
 import json
-from typing import Dict, Any
+import os
+from typing import Any
+
 from rlm import RLM
 from src.mlirAgent.config import Config
+
 
 class LogAnalysisAgent:
     def __init__(self, model_name: str = "gpt-4o"):
@@ -22,7 +24,7 @@ class LogAnalysisAgent:
             verbose=True
         )
 
-    def analyze_compiler_artifacts(self, artifacts_path: str, query: str) -> Dict[str, Any]:
+    def analyze_compiler_artifacts(self, artifacts_path: str, query: str) -> dict[str, Any]:
         """
         Uses RLM to analyze a massive folder of compiler artifacts (MLIR pass history).
         """
