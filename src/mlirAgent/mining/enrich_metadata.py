@@ -1,11 +1,12 @@
-import json
-import re
-import os
-import aiohttp
-import asyncio
 import argparse
-from tqdm import tqdm
+import asyncio
+import json
+import os
+import re
+
+import aiohttp
 from dotenv import load_dotenv
+from tqdm import tqdm
 
 # Load environment variables (GITHUB_TOKEN) from .env
 load_dotenv()
@@ -49,7 +50,7 @@ async def fetch_pr_labels(session, pr_number, token):
         return []
 
 async def enrich_recipes(input_file, output_file, token):
-    print(f"🏷️  Enriching Metadata")
+    print("🏷️  Enriching Metadata")
     print(f"    ├── Input:  {input_file}")
     print(f"    └── Output: {output_file}")
     
@@ -58,7 +59,7 @@ async def enrich_recipes(input_file, output_file, token):
         print(f"❌ Error: Input file not found: {input_file}")
         return
 
-    with open(input_file, 'r') as f:
+    with open(input_file) as f:
         recipes = [json.loads(line) for line in f]
 
     print(f"    └── Found {len(recipes)} recipes to process.")

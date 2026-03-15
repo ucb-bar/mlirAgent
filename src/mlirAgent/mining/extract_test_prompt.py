@@ -1,5 +1,5 @@
-import json
 import argparse
+import json
 import os
 
 # The Exact Prompt Template used in Production
@@ -44,7 +44,7 @@ def extract_best_candidate(input_file, output_file):
         print(f"❌ Error: Input file not found: {input_file}")
         return
 
-    with open(input_file, 'r') as f:
+    with open(input_file) as f:
         # Load all lines to search globally
         recipes = [json.loads(line) for line in f]
     

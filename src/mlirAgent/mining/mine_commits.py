@@ -1,7 +1,7 @@
-import os
-import json
 import argparse
-from typing import List, Dict, Set
+import json
+import os
+
 from pydriller import Repository
 from tqdm import tqdm
 
@@ -11,7 +11,7 @@ CODE_EXTENSIONS = {'.cpp', '.h', '.hpp', '.td', '.py'}
 # Verification: The proof that the logic works
 TEST_EXTENSIONS = {'.mlir', '.ll'} 
 
-def is_relevant_path(file_path: str, subsystems: List[str]) -> bool:
+def is_relevant_path(file_path: str, subsystems: list[str]) -> bool:
     """
     Path-Based Heuristic (Robust).
     Checks if the file belongs to one of the target subsystems (e.g., 'mlir/', 'iree/').
@@ -22,7 +22,7 @@ def is_relevant_path(file_path: str, subsystems: List[str]) -> bool:
         return True # If no restriction, everything is valid
     return any(sub in file_path for sub in subsystems)
 
-def analyze_commit(commit, subsystems: List[str]) -> Dict:
+def analyze_commit(commit, subsystems: list[str]) -> dict:
     """
     Analyzes a commit to see if it qualifies as a "Recipe".
     Returns a dict if valid, None otherwise.
@@ -78,7 +78,7 @@ def analyze_commit(commit, subsystems: List[str]) -> Dict:
     
     return None
 
-def mine_repository(repo_path: str, output_file: str, subsystems: List[str], limit: int):
+def mine_repository(repo_path: str, output_file: str, subsystems: list[str], limit: int):
     print(f"⛏️  Mining Repository: {repo_path}")
     print(f"🎯 Target Subsystems: {subsystems if subsystems else 'ALL'}")
     print(f"📂 Output: {output_file}")
