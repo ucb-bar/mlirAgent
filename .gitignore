@@ -228,7 +228,6 @@ scip_pb2.py
 data/knowledge_base/neo4j/*
 
 # Evolve experiments (large outputs, checkpoints, logs)
-experiments/
 
 # Benchmark bitcode and binaries (large files)
 *.bc

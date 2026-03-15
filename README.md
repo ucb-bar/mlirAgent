@@ -24,7 +24,11 @@ Provides the necessary hooks for agents to interact with the compiler:
 ### Dependencies
 Create a virtual environment and install the package in editable mode:
 ```bash
-python3 -m venv venv
-source venv/bin/activate
+ tree -L 3 --gitignore -I 'third_party'
+```
+
+We can use:
+
+```bash
 pip install -e .
 ```
