@@ -272,7 +272,7 @@ def run_benchmark(name: str, binary_path: str, tmp_dir: str, data_dir: str):
     if config.get("stdin_file") and bench_data.exists():
         stdin_src = bench_data / config["stdin_file"]
         if stdin_src.exists():
-            stdin_fh = open(str(stdin_src), "r")
+            stdin_fh = open(str(stdin_src))
 
     cmd = [run_binary] + config.get("args", [])
     timeout = config.get("timeout", 30)

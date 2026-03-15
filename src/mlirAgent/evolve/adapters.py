@@ -4,17 +4,11 @@ Translates our unified config (task + agent + framework YAML) into the
 specific format each evolution framework expects, then launches it.
 """
 
-import os
 import sys
-import tempfile
 from abc import ABC, abstractmethod
-from pathlib import Path
-from typing import Dict, Any, Optional
-
-import yaml
+from typing import Any
 
 from ..config import Config
-from .providers import load_agent_config
 
 
 class FrameworkAdapter(ABC):
@@ -25,19 +19,19 @@ class FrameworkAdapter(ABC):
         self.agent_config = None
         self.framework_config = None
 
-    def configure(self, task, agent_config: Dict[str, Any], framework_config: Dict[str, Any]):
+    def configure(self, task, agent_config: dict[str, Any], framework_config: dict[str, Any]):
         """Store task, agent, and framework configs."""
         self.task = task
         self.agent_config = agent_config
         self.framework_config = framework_config
 
     @abstractmethod
-    def launch(self, dry_run: bool = False, max_iterations: Optional[int] = None) -> Dict[str, Any]:
+    def launch(self, dry_run: bool = False, max_iterations: int | None = None) -> dict[str, Any]:
         """Start the evolution run. Returns result dict."""
         ...
 
     @abstractmethod
-    def get_results(self) -> Dict[str, Any]:
+    def get_results(self) -> dict[str, Any]:
         """Return results from the most recent run."""
         ...
 
@@ -49,13 +43,14 @@ class OpenEvolveAdapter(FrameworkAdapter):
         super().__init__()
         self._result = None
 
-    def launch(self, dry_run: bool = False, max_iterations: Optional[int] = None) -> Dict[str, Any]:
+    def launch(self, dry_run: bool = False, max_iterations: int | None = None) -> dict[str, Any]:
         # Ensure openevolve is importable
         oe_path = Config.OPENEVOLVE_PATH
         if oe_path not in sys.path:
             sys.path.insert(0, oe_path)
 
-        from openevolve.config import Config as OEConfig, LLMModelConfig
+        from openevolve.config import Config as OEConfig
+        from openevolve.config import LLMModelConfig
 
         # Build OpenEvolve config from our YAML configs
         oe_cfg = OEConfig()
@@ -121,20 +116,20 @@ class OpenEvolveAdapter(FrameworkAdapter):
         }
         return self._result
 
-    def get_results(self) -> Dict[str, Any]:
+    def get_results(self) -> dict[str, Any]:
         return self._result or {}
 
 
 class ShinkaAdapter(FrameworkAdapter):
     """Adapter for ShinkaEvolve (stub — not yet implemented)."""
 
-    def launch(self, dry_run: bool = False, max_iterations: Optional[int] = None) -> Dict[str, Any]:
+    def launch(self, dry_run: bool = False, max_iterations: int | None = None) -> dict[str, Any]:
         raise NotImplementedError(
             "ShinkaEvolve adapter is not yet implemented. "
             "Use --framework openevolve for now."
         )
 
-    def get_results(self) -> Dict[str, Any]:
+    def get_results(self) -> dict[str, Any]:
         raise NotImplementedError("ShinkaEvolve adapter is not yet implemented.")
 
 

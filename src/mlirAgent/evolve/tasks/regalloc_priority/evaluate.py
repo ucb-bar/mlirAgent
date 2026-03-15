@@ -24,16 +24,28 @@ from pathlib import Path
 
 try:
     from ..llvm_bench import (
-        EvalConfig, build_llvm, eval_benchmarks, extract_hyperparams,
-        find_benchmarks, load_baseline, optuna_tune, patch_source,
+        EvalConfig,
+        build_llvm,
+        eval_benchmarks,
+        extract_hyperparams,
+        find_benchmarks,
+        load_baseline,
+        optuna_tune,
+        patch_source,
         restore_source,
     )
 except ImportError:
     # Standalone loading by OpenEvolve's importlib (no parent package)
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from llvm_bench import (
-        EvalConfig, build_llvm, eval_benchmarks, extract_hyperparams,
-        find_benchmarks, load_baseline, optuna_tune, patch_source,
+        EvalConfig,
+        build_llvm,
+        eval_benchmarks,
+        extract_hyperparams,
+        find_benchmarks,
+        load_baseline,
+        optuna_tune,
+        patch_source,
         restore_source,
     )
 

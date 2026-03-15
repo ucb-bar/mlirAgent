@@ -27,10 +27,10 @@ _OE_PATH = str(_MLIREVOLVE_ROOT / "third_party" / "openevolve")
 if _OE_PATH not in sys.path:
     sys.path.insert(0, _OE_PATH)
 
-from openevolve.config import Config as OEConfig, LLMModelConfig, load_config
+from openevolve.config import Config as OEConfig
+from openevolve.config import LLMModelConfig
 from openevolve.controller import OpenEvolve
 from openevolve.llm.manual import create_manual_llm
-
 
 EXAMPLES = {
     "function_minimization": {
@@ -397,7 +397,7 @@ async def _run(args):
             checkpoint_path=args.resume,
         )
         if best:
-            print(f"\nEvolution complete! Best metrics:")
+            print("\nEvolution complete! Best metrics:")
             for k, v in best.metrics.items():
                 if isinstance(v, float):
                     print(f"  {k}: {v:.4f}")

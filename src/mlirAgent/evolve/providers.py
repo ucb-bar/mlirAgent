@@ -6,14 +6,14 @@ consumable by framework adapters (OpenEvolve, ShinkaEvolve).
 
 import os
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Any
 
 import yaml
 
 from ..config import Config
 
 
-def load_agent_config(agent_name: str, configs_dir: Optional[str] = None) -> Dict[str, Any]:
+def load_agent_config(agent_name: str, configs_dir: str | None = None) -> dict[str, Any]:
     """Load an agent YAML config by name.
 
     Args:
@@ -38,7 +38,7 @@ def load_agent_config(agent_name: str, configs_dir: Optional[str] = None) -> Dic
     return cfg
 
 
-def list_agents(configs_dir: Optional[str] = None) -> list:
+def list_agents(configs_dir: str | None = None) -> list:
     """List available agent config names."""
     base = Path(configs_dir or Config.EVOLVE_CONFIGS_DIR) / "agents"
     if not base.exists():

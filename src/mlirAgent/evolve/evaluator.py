@@ -1,9 +1,9 @@
-import os
 import re
 import subprocess
+
 import optuna
-from typing import Dict, Any
 from openevolve.evaluation_result import EvaluationResult
+
 
 class MagellanEvaluator:
     def __init__(self, llvm_build_dir, benchmark_script):

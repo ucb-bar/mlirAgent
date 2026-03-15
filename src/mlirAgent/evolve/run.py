@@ -10,14 +10,13 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Any
 
 import yaml
 
 from ..config import Config
 from .adapters import ADAPTERS
-from .providers import load_agent_config, list_agents
-
+from .providers import load_agent_config
 
 # Registry of available tasks
 TASKS = {
@@ -46,7 +45,7 @@ def _load_task(task_name: str, configs_dir: str) -> Any:
     return task_cls(task_config)
 
 
-def _load_framework_config(framework_name: str, configs_dir: str) -> Dict[str, Any]:
+def _load_framework_config(framework_name: str, configs_dir: str) -> dict[str, Any]:
     """Load framework YAML config."""
     fw_yaml = Path(configs_dir) / "frameworks" / f"{framework_name}.yaml"
     if not fw_yaml.exists():

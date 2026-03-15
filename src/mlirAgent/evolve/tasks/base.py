@@ -2,7 +2,7 @@
 
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Any
 
 
 class Task(ABC):
@@ -14,7 +14,7 @@ class Task(ABC):
         ...
 
     @abstractmethod
-    def get_evolve_blocks(self) -> List[str]:
+    def get_evolve_blocks(self) -> list[str]:
         """Return list of block names that can be evolved."""
         ...
 
@@ -24,6 +24,6 @@ class Task(ABC):
         ...
 
     @abstractmethod
-    def evaluate(self, program_path: Path) -> Dict[str, Any]:
+    def evaluate(self, program_path: Path) -> dict[str, Any]:
         """Run evaluation and return metrics dict with at least 'score'."""
         ...
