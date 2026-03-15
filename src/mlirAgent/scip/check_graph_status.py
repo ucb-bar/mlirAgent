@@ -1,6 +1,6 @@
 import sys
-import os
 from pathlib import Path
+
 from neo4j import GraphDatabase
 
 # Setup Path
@@ -8,6 +8,7 @@ project_root = Path(__file__).resolve().parents[3]
 sys.path.append(str(project_root))
 
 from src.mlirAgent.config import Config
+
 
 def check_status():
     print(f"🔌 Connecting to Neo4j at {Config.NEO4J_URI}...")
@@ -40,7 +41,7 @@ def check_status():
             result = session.run("MATCH ()-[r]->() RETURN count(r) as count")
             edge_count = result.single()["count"]
             
-            print(f"\n📊 Graph Statistics:")
+            print("\n📊 Graph Statistics:")
             print(f"   • Nodes: {node_count:,}")
             print(f"   • Edges: {edge_count:,}")
             
