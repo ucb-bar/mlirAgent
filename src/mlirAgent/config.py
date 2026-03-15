@@ -1,6 +1,6 @@
 import os
-import sys
 from pathlib import Path
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -88,7 +88,7 @@ class Config:
 
         ninja_file = os.path.join(cls.BUILD_DIR, "build.ninja")
         if not os.path.exists(ninja_file):
-            print(f"⚠️  WARNING: No 'build.ninja' found. Agent must run `reconfigure=True`.")
+            print("⚠️  WARNING: No 'build.ninja' found. Agent must run `reconfigure=True`.")
 
 # Run validation
 Config.validate()

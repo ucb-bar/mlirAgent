@@ -1,6 +1,5 @@
 import os
 import sys
-from typing import List
 
 # Allow running as a script without installation
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -47,7 +46,7 @@ def build(target: str = "install", fast_mode: bool = False, clean: bool = False,
 
 
 @mcp.tool
-def compile_mlir(mlir_text: str, flags: List[str] | None = None) -> dict:
+def compile_mlir(mlir_text: str, flags: list[str] | None = None) -> dict:
     """Compile MLIR text with iree-compile."""
     try:
         return run_compile(mlir_text, flags=flags or [])
@@ -56,10 +55,10 @@ def compile_mlir(mlir_text: str, flags: List[str] | None = None) -> dict:
 
 
 @mcp.tool
-def compile_mlir_file(path: str, flags: List[str] | None = None) -> dict:
+def compile_mlir_file(path: str, flags: list[str] | None = None) -> dict:
     """Compile an MLIR file from disk with iree-compile."""
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             mlir_text = f.read()
         return run_compile(mlir_text, flags=flags or [])
     except Exception as exc:
@@ -79,9 +78,9 @@ def verify_ir(ir_text: str, check_text: str) -> dict:
 def verify_ir_files(ir_path: str, check_path: str) -> dict:
     """Run FileCheck against IR/check files on disk."""
     try:
-        with open(ir_path, "r", encoding="utf-8") as f:
+        with open(ir_path, encoding="utf-8") as f:
             ir_text = f.read()
-        with open(check_path, "r", encoding="utf-8") as f:
+        with open(check_path, encoding="utf-8") as f:
             check_text = f.read()
         return verify_output(ir_text, check_text)
     except Exception as exc:
