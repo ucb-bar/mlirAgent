@@ -1,6 +1,5 @@
 import os
 import sys
-import re
 
 # Ensure src is in path
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
@@ -36,7 +35,7 @@ def main():
     ctx = ir.Context()
     ctx.allow_unregistered_dialects = True
     
-    with open(target_file, "r") as f:
+    with open(target_file) as f:
         content = f.read()
     
     try:

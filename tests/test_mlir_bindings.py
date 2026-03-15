@@ -1,6 +1,6 @@
+import difflib
 import os
 import sys
-import difflib
 
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
@@ -32,7 +32,7 @@ class MLIRGranularExplorer:
         if not os.path.exists(filepath):
             raise FileNotFoundError(f"File not found: {filepath}")
 
-        with open(filepath, "r") as f:
+        with open(filepath) as f:
             self.content = f.read()
         
         print(f"Parsing module ({len(self.content)} bytes)...")

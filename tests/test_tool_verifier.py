@@ -1,5 +1,5 @@
-import pytest
 from mlirAgent.tools.verifier import verify_output
+
 
 def test_verifier_logic():
     """

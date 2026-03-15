@@ -1,6 +1,5 @@
 import os
 import sys
-import json
 
 # Ensure src is in path
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
@@ -19,7 +18,7 @@ def main():
     print(f"🎯 Target: {TARGET_FILE}:{TARGET_LINE}")
     
     if not os.path.exists(TARGET_ROOT):
-        print(f"❌ Error: Target directory does not exist.")
+        print("❌ Error: Target directory does not exist.")
         return
 
     try:

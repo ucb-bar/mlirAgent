@@ -1,5 +1,7 @@
-from mlirAgent.tools.compiler import run_compile
 import os
+
+from mlirAgent.tools.compiler import run_compile
+
 
 def test_compiler_execution():
     dummy_mlir = """

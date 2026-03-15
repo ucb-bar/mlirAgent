@@ -1,6 +1,7 @@
-import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
+
 from mlirAgent.tools.build import run_build
+
 
 @patch('mlirAgent.tools.build.subprocess.run')
 def test_clean_build_logic(mock_subprocess):
