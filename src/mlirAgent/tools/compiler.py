@@ -1,8 +1,9 @@
-import subprocess
 import hashlib
+import subprocess
 import time
-from pathlib import Path
+
 from ..config import Config
+
 
 def run_compile(mlir_content: str, flags: list = None) -> dict:
     """

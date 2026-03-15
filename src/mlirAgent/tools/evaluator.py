@@ -9,8 +9,7 @@ import os
 import shutil
 import subprocess
 import time
-from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Any
 
 from ..config import Config
 
@@ -18,9 +17,9 @@ from ..config import Config
 def evaluate_heuristic(
     heuristic_path: str,
     target_file: str = "llvm/lib/Analysis/InlineAdvisor.cpp",
-    build_targets: Optional[list] = None,
-    benchmark_binary: Optional[str] = None,
-) -> Dict[str, Any]:
+    build_targets: list | None = None,
+    benchmark_binary: str | None = None,
+) -> dict[str, Any]:
     """
     Evaluate an evolved heuristic by patching it into LLVM and rebuilding.
 

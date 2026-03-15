@@ -1,9 +1,8 @@
+import argparse
+import difflib
+import json
 import os
 import re
-import sys
-import json
-import difflib
-import argparse
 
 # --- UTILS ---
 
@@ -104,7 +103,7 @@ def smart_collapse(prev_text, curr_text):
 # --- EXTRACTION LOGIC ---
 
 def extract_block_by_loc(file_path, target_filename, target_line):
-    with open(file_path, 'r') as f:
+    with open(file_path) as f:
         lines = f.readlines()
 
     search_marker = f'{target_filename}":{target_line}'

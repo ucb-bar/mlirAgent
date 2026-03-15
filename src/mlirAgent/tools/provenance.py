@@ -1,9 +1,9 @@
-import os
-import re
+import argparse
 import difflib
 import json
-import argparse
-from typing import List, Dict, Optional, Any
+import os
+import re
+from typing import Any
 
 # --- ROBUST BINDING IMPORT ---
 # We prioritize IREE bindings as they include the specific dialects (flow, stream, hal)
@@ -43,7 +43,7 @@ class MLIRProvenanceTracer:
         """Sorts filenames naturally (1, 2, ... 10) instead of lexicographically (1, 10, 2)."""
         return [int(c) if c.isdigit() else c for c in re.split(r'(\d+)', text)]
 
-    def _get_history_files(self, root_dir: str) -> List[Dict]:
+    def _get_history_files(self, root_dir: str) -> list[dict]:
         """Scans the history directory for .mlir files."""
         files = []
         if not os.path.exists(root_dir):
@@ -107,7 +107,7 @@ class MLIRProvenanceTracer:
                     for child in block:
                         self._recursive_walk(child, callback)
 
-    def _find_op_and_process(self, module, filename: str, line: int, ctx) -> Optional[str]:
+    def _find_op_and_process(self, module, filename: str, line: int, ctx) -> str | None:
         """
         1. Walks the parsed module to find the op at `filename:line`.
         2. Sanitizes it (strips locs/weights).
@@ -183,7 +183,7 @@ class MLIRProvenanceTracer:
         return "\n".join(output)
 
     # --- 4. MAIN TRACE API ---
-    def trace(self, artifacts_root: str, source_filename: str, line_number: int) -> Dict[str, Any]:
+    def trace(self, artifacts_root: str, source_filename: str, line_number: int) -> dict[str, Any]:
         """
         Main entry point. Scans history, parses files, tracks changes.
         """
@@ -209,7 +209,7 @@ class MLIRProvenanceTracer:
             ctx.allow_unregistered_dialects = True
             
             try:
-                with open(file_info['path'], 'r') as f:
+                with open(file_info['path']) as f:
                     content = f.read()
                 
                 # Skip empty dumps
@@ -249,7 +249,7 @@ class MLIRProvenanceTracer:
                 if current_clean_code:
                     last_clean_code = current_clean_code
 
-            except Exception as e:
+            except Exception:
                 # If a specific intermediate IR is invalid (common in dev), skip it.
                 # print(f"Warning: Failed to parse {file_info['name']}: {e}")
                 pass
