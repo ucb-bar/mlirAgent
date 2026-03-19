@@ -1,4 +1,4 @@
-# Repository Map (mlirEvolve)
+# Repository Map (mlirAgent)
 
 ## Key Paths
 - `src/mlirAgent/tools/`: Tool wrappers and domain folders.

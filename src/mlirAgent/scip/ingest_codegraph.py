@@ -2,20 +2,15 @@ import os
 import re
 import sys
 import time
-from pathlib import Path
 
 from neo4j import GraphDatabase
 
-# [0] scip -> [1] mlirAgent -> [2] src -> [3] mlirEvolve (Root)
-project_root = Path(__file__).resolve().parents[3]
-sys.path.append(str(project_root))
-
-from src.mlirAgent.config import Config
+from mlirAgent.config import Config
 
 try:
-    from src.mlirAgent.scip import scip_pb2
+    from mlirAgent.scip import scip_pb2
 except ImportError:
-    print("❌ Error: scip_pb2 not found. Check src/mlirAgent/scip/")
+    print("Error: scip_pb2 not found. Check src/mlirAgent/scip/")
     sys.exit(1)
 
 # SCIP Kind Mapping (Fallback if metadata ever appears)

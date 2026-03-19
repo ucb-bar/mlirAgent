@@ -1,8 +1,5 @@
 import difflib
 import os
-import sys
-
-sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
 try:
     import iree.compiler.ir as ir
@@ -15,8 +12,18 @@ except ImportError:
         print("❌ Error: No MLIR bindings found. Please set PYTHONPATH correctly.")
         sys.exit(1)
 
-# Target File
-TARGET_FILE = "/scratch2/agustin/merlin/mlirEvolve/experiments/iree_artifacts/compilation_quantized_matmul/artifacts_riscv/ir_pass_history/builtin_module_no-symbol-name/68_iree-stream-materialize-encodings.mlir"
+# Target File — resolve relative to the project root
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+TARGET_FILE = os.path.join(
+    _PROJECT_ROOT,
+    "experiments",
+    "iree_artifacts",
+    "compilation_quantized_matmul",
+    "artifacts_riscv",
+    "ir_pass_history",
+    "builtin_module_no-symbol-name",
+    "68_iree-stream-materialize-encodings.mlir",
+)
 
 
 class Traversal:

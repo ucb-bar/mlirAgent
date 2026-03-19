@@ -1,4 +1,4 @@
 interface:
-  display_name: "MLIR Evolve"
-  short_description: "Tooling + workflows for mlirEvolve"
+  display_name: "mlirAgent"
+  short_description: "Tooling + workflows for mlirAgent"
   default_prompt: "Use $mlir-evolve to plan or implement tools in this repo."

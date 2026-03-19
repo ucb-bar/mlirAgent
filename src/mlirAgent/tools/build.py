@@ -3,6 +3,7 @@ import re
 import shutil
 import subprocess
 import sys
+from typing import Any
 
 from ..config import Config
 
@@ -10,7 +11,7 @@ from ..config import Config
 def run_build(target: str = "install", 
               fast_mode: bool = False, 
               clean: bool = False, 
-              reconfigure: bool = False) -> dict[str, any]:
+              reconfigure: bool = False) -> dict[str, Any]:
     """
     Executes the build process using Ninja.
     """
@@ -54,7 +55,7 @@ def run_build(target: str = "install",
         return _format_error("Ninja binary not found.", " ".join(cmd))
 
 
-def _run_cmake() -> dict[str, any]:
+def _run_cmake() -> dict[str, Any]:
     """
     Runs the CMake configuration command.
     This logic is ported directly from your bash script.

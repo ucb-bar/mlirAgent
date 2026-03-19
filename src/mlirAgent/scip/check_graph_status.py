@@ -1,13 +1,6 @@
-import sys
-from pathlib import Path
-
 from neo4j import GraphDatabase
 
-# Setup Path
-project_root = Path(__file__).resolve().parents[3]
-sys.path.append(str(project_root))
-
-from src.mlirAgent.config import Config
+from mlirAgent.config import Config
 
 
 def check_status():

@@ -236,6 +236,12 @@ src/mlirAgent/evolve/tasks/*/baseline*.json
 /src/mlirAgent/evolve/tasks/llvm_inlining/benchmarks/testsuite/
 
 
+# Evolve experiment outputs
+experiments/run_*/
+
+# Claude Code
+.claude/
+
 # LLVM build artifacts
 llvm-build/
 llvm-project/

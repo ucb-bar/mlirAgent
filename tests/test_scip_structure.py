@@ -1,16 +1,11 @@
 import os
-import sys
-from pathlib import Path
 
 import pytest
 
-# --- Setup Imports ---
-sys.path.append(str(Path(__file__).parent.parent))
-
-from src.mlirAgent.config import Config
+from mlirAgent.config import Config
 
 try:
-    from src.mlirAgent.scip import scip_pb2
+    from mlirAgent.scip import scip_pb2
 except ImportError:
     pytest.fail("Could not import scip_pb2. Check src/mlirAgent/scip/")
 

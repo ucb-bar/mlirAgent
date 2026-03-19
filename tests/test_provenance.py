@@ -1,10 +1,6 @@
 import os
-import sys
 
-# Ensure src is in path
-sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
-
-from src.mlirAgent.tools.provenance import MLIRProvenanceTracer
+from mlirAgent.tools.provenance import MLIRProvenanceTracer
 
 # --- CONFIGURATION ---
 TARGET_ROOT = "experiments/iree_artifacts/compilation_quantized_matmul/artifacts_riscv/ir_pass_history/builtin_module_no-symbol-name"

@@ -1,34 +1,46 @@
-# mlirEvolve: Agentic Compiler Engineering Framework
+# mlirAgent: AI-Guided MLIR/LLVM Compiler Optimization
 
-**mlirEvolve** is a research framework designed to automate MLIR compiler development using LLM agents. It bridges the gap between raw compiler source code and AI agents by creating high-quality datasets and semantic knowledge graphs.
+**mlirAgent** is a research framework for automating MLIR compiler development using LLM agents.
+It bridges raw compiler source code and AI agents through high-quality datasets, semantic knowledge graphs, and evolutionary optimization.
 
-## 🚀 Key Features
+Key result: **8.78% binary size reduction** via LLM-guided LLVM inlining heuristic evolution.
 
-### 1. "Recipe" Mining (`src/mlirAgent/mining`)
-Extracts "Gold Standard" compiler recipes from git history (e.g., LLVM/IREE).
-- **Heuristic:** Identifies atomic commits that modify **Logic** (C++/TableGen) and include verifying **Tests** (MLIR/LLVM IR).
-- **Noise Filtering:** Automatically filters out merges, refactors, and formatting changes to ensure high-quality training data for agents.
+## Modules
 
-### 2. Code Knowledge Graph (`src/mlirAgent/scip`)
-Hydrates a **Neo4j** graph database with a deep semantic understanding of the codebase.
-- **SCIP Integration:** Uses SCIP indexing to map definitions, references, and scopes.
-- **Graph Schema:** Models complex relationships (`DEFINES`, `CALLS`, `HAS_NESTED`) between Functions, Methods, Classes, and Files, enabling agents to query the codebase structure effectively.
+| Module | Path | Purpose |
+|--------|------|---------|
+| **Mining** | `src/mlirAgent/mining/` | Extract "gold standard" compiler recipes from git history |
+| **SCIP/Knowledge Graph** | `src/mlirAgent/scip/` | Hydrate Neo4j with SCIP-indexed codebase structure |
+| **Tools** | `src/mlirAgent/tools/` | Compiler wrappers, verification, provenance tracing |
+| **Evolve** | `src/mlirAgent/evolve/` | LLM-driven evolutionary optimization of compiler heuristics |
+| **RLM** | `src/mlirAgent/rlm/` | Reasoning Language Model integration for log analysis |
 
-### 3. Agent Tooling (`src/mlirAgent/tools`)
-Provides the necessary hooks for agents to interact with the compiler:
-- **Compiler Wrapper:** robust execution of `iree-compile` with timeout handling and artifact management.
-- **Verification:** Automated checking of generated artifacts.
-
-## 🛠️ Setup & Installation
-
-### Dependencies
-Create a virtual environment and install the package in editable mode:
-```bash
- tree -L 3 --gitignore -I 'third_party'
-```
-
-We can use:
+## Setup
 
 ```bash
+# Create a virtualenv and install in editable mode
+python -m venv .venv
+source .venv/bin/activate
 pip install -e .
+
+# With optional dependencies
+pip install -e ".[evolve,dev]"
 ```
+
+## Usage
+
+```bash
+# CLI
+mlirAgent --help
+mlirAgent build --fast
+mlirAgent compile --input model.mlir
+
+# MCP Server
+mlirAgent-mcp
+```
+
+## Documentation
+
+- `docs/neo4j_setup.md` — Neo4j knowledge graph setup
+- `docs/agent_integration.md` — Agent integration guide
+- `experiments/` — Research sandbox with artifact traces and experiment outputs

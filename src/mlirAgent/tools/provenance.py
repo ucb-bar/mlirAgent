@@ -1,9 +1,13 @@
 import argparse
-import difflib
 import json
+import logging
 import os
 import re
 from typing import Any
+
+from mlirAgent.tools._provenance_common import get_history_files, smart_collapse
+
+logger = logging.getLogger(__name__)
 
 # --- ROBUST BINDING IMPORT ---
 # We prioritize IREE bindings as they include the specific dialects (flow, stream, hal)
@@ -38,28 +42,7 @@ class MLIRProvenanceTracer:
                 "This tool requires 'iree-compiler' or 'mlir' python packages."
             )
 
-    # --- 1. FILE DISCOVERY ---
-    def _natural_key(self, text):
-        """Sorts filenames naturally (1, 2, ... 10) instead of lexicographically (1, 10, 2)."""
-        return [int(c) if c.isdigit() else c for c in re.split(r'(\d+)', text)]
-
-    def _get_history_files(self, root_dir: str) -> list[dict]:
-        """Scans the history directory for .mlir files."""
-        files = []
-        if not os.path.exists(root_dir):
-            return []
-            
-        for dirpath, _, filenames in os.walk(root_dir):
-            for f in filenames:
-                if f.endswith(".mlir"):
-                    files.append({
-                        "path": os.path.join(dirpath, f),
-                        "name": f,
-                        "rel_dir": os.path.basename(dirpath),
-                        "sort_key": self._natural_key(f)
-                    })
-        files.sort(key=lambda x: x["sort_key"])
-        return files
+    # --- 1. FILE DISCOVERY (delegated to _provenance_common) ---
 
     # --- 2. STRUCTURAL PROCESSING (The Core Binding Logic) ---
     
@@ -90,8 +73,7 @@ class MLIRProvenanceTracer:
                         placeholder = ir.StringAttr.get(f"... [TRUNCATED {len(s_val)} chars] ...", context=ctx)
                         child_op.attributes[attr_name] = placeholder
             except Exception:
-                # Some attributes might be system-managed/read-only; skip them safely
-                pass
+                logger.debug("Skipping read-only attributes on %s", child_op.name)
                 
             return 0 # Continue walk
 
@@ -148,39 +130,7 @@ class MLIRProvenanceTracer:
             
         return None
 
-    # --- 3. TEXT DIFFERENCING (Smart Collapse) ---
-    def _smart_collapse(self, prev_text: str, curr_text: str) -> str:
-        """
-        Performs a diff between two text blocks, collapsing unchanged regions.
-        """
-        if not prev_text: return curr_text 
-
-        prev_lines = prev_text.splitlines()
-        curr_lines = curr_text.splitlines()
-        
-        matcher = difflib.SequenceMatcher(None, prev_lines, curr_lines)
-        output = []
-        
-        for opcode, i1, i2, j1, j2 in matcher.get_opcodes():
-            # opcode is one of: 'replace', 'delete', 'insert', 'equal'
-            if opcode == 'equal':
-                block_len = j2 - j1
-                if block_len < 6:
-                    # Keep small context
-                    output.extend(curr_lines[j1:j2])
-                else:
-                    # Collapse large unchanged blocks
-                    output.extend(curr_lines[j1:j1+2])
-                    skipped = block_len - 4
-                    output.append(f"    ... [collapsed {skipped} unchanged lines] ...")
-                    output.extend(curr_lines[j2-2:j2])
-            else:
-                # For changes, we just output the new lines (simplification for Agent readability)
-                # Ideally, a real diff format (-/+) might be better, but agents often prefer
-                # just seeing the "New State".
-                output.extend(curr_lines[j1:j2])
-                
-        return "\n".join(output)
+    # --- 3. TEXT DIFFERENCING (delegated to _provenance_common.smart_collapse) ---
 
     # --- 4. MAIN TRACE API ---
     def trace(self, artifacts_root: str, source_filename: str, line_number: int) -> dict[str, Any]:
@@ -195,7 +145,7 @@ class MLIRProvenanceTracer:
         if not os.path.exists(history_root):
             return {"error": f"History directory not found: {history_root}"}
 
-        files = self._get_history_files(history_root)
+        files = get_history_files(history_root)
         timeline = []
         last_clean_code = None
         
@@ -236,7 +186,7 @@ class MLIRProvenanceTracer:
                     # If they differ, it means logic changed, not just line numbers.
                     if current_clean_code != last_clean_code:
                         status = "modified"
-                        display_code = self._smart_collapse(last_clean_code, current_clean_code)
+                        display_code = smart_collapse(last_clean_code, current_clean_code)
 
                 if status != "unchanged":
                     timeline.append({
@@ -250,9 +200,7 @@ class MLIRProvenanceTracer:
                     last_clean_code = current_clean_code
 
             except Exception:
-                # If a specific intermediate IR is invalid (common in dev), skip it.
-                # print(f"Warning: Failed to parse {file_info['name']}: {e}")
-                pass
+                logger.debug("Failed to parse %s, skipping", file_info["name"])
 
         return {
             "query": f"{source_filename}:{line_number}",

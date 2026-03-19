@@ -1,11 +1,3 @@
-import os
-import sys
-
-# Allow running as a script without installation
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-if PROJECT_ROOT not in sys.path:
-    sys.path.append(PROJECT_ROOT)
-
 try:
     from mcp.server.fastmcp import FastMCP
 except Exception:
@@ -23,7 +15,7 @@ from mlirAgent.tools.provenance import MLIRProvenanceTracer
 from mlirAgent.tools.trace_provenance import trace_provenance
 from mlirAgent.tools.verifier import verify_output
 
-mcp = FastMCP("mlirEvolve")
+mcp = FastMCP("mlirAgent")
 
 
 def _error_result(message: str, command: str) -> dict:

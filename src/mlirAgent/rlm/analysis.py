@@ -4,7 +4,7 @@ import os
 from typing import Any
 
 from rlm import RLM
-from src.mlirAgent.config import Config
+from mlirAgent.config import Config
 
 
 class LogAnalysisAgent:
@@ -46,7 +46,7 @@ class LogAnalysisAgent:
         
         TASK:
         1. Import the provenance tool:
-           `from src.mlirAgent.tools.provenance import MLIRProvenanceTracer`
+           `from mlirAgent.tools.provenance import MLIRProvenanceTracer`
         2. Instantiate it: `tracer = MLIRProvenanceTracer()`
         3. If the user asks about a specific file/line (e.g. "input.mlir:37"), use `tracer.trace(...)`.
         4. If the user asks about a general error, scan the directory for the latest file or use standard python to grep.

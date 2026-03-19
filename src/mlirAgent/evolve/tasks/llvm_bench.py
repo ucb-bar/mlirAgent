@@ -6,6 +6,7 @@ pipeline (opt -> llc -> gcc), baseline caching, scoring, and Optuna tuning.
 """
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -13,6 +14,8 @@ import subprocess
 import tempfile
 import time
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 from pathlib import Path
 
 try:
@@ -444,7 +447,7 @@ def load_baseline(config: EvalConfig):
             json.dump(baseline, f, indent=2)
         print(f"  Baseline saved to {baseline_path}")
     except OSError:
-        pass
+        logger.warning("Failed to save baseline cache to %s", baseline_path)
 
     return baseline
 

@@ -1,9 +1,5 @@
-import sys
-from pathlib import Path
-
-sys.path.append(str(Path(__file__).parent.parent))
-from config import Config
-from scip import scip_pb2
+from mlirAgent.config import Config
+from mlirAgent.scip import scip_pb2
 
 path = str(Config.PROJECT_ROOT / "data" / "knowledge_base" / "scip" / "index_test.scip")
 

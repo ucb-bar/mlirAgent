@@ -1,14 +1,9 @@
 import argparse
-import sys
-from pathlib import Path
 
-import scip_pb2  # Assuming you have the protobuf generated
+import scip_pb2
 from neo4j import GraphDatabase
 
-# Setup paths (Adjust as needed to match your project)
-project_root = Path(__file__).resolve().parents[3]
-sys.path.append(str(project_root))
-from src.mlirAgent.config import Config
+from mlirAgent.config import Config
 
 
 class GraphRefresher:

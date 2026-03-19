@@ -1,11 +1,12 @@
 import os
 import subprocess
 import tempfile
+from typing import Any
 
 from ..config import Config
 
 
-def verify_output(output_ir: str, check_content: str) -> dict[str, any]:
+def verify_output(output_ir: str, check_content: str) -> dict[str, Any]:
     """
     Pipes 'output_ir' into FileCheck, validating it against 'check_content'.
     

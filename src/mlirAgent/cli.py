@@ -1,12 +1,5 @@
 import argparse
 import json
-import os
-import sys
-
-# Allow running as a script without installation
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-if PROJECT_ROOT not in sys.path:
-    sys.path.append(PROJECT_ROOT)
 
 from mlirAgent.tools.build import run_build
 from mlirAgent.tools.compiler import run_compile
@@ -59,7 +52,7 @@ def cmd_trace_provenance(args: argparse.Namespace) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="mlirEvolve CLI")
+    parser = argparse.ArgumentParser(description="mlirAgent CLI")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_build = sub.add_parser("build", help="Run Ninja/CMake build")
