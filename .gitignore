@@ -227,6 +227,20 @@ scip_pb2.py
 # Ignore neo4j database folder
 data/knowledge_base/neo4j/*
 
+# Knowledge base (generated, large)
+data/knowledge_base/*.sqlite
+
+# Research artifacts (generated — reproduce via scripts/)
+data/research/transformations.sqlite
+data/research/models/
+data/research/results/
+
+# Tracking artifacts (generated from IREE pass dumps)
+data/artifacts/tracking/
+
+# Outcome logs (runtime generated)
+data/outcomes/
+
 # Evolve experiments (large outputs, checkpoints, logs)
 
 # Benchmark bitcode and binaries (large files)
@@ -234,7 +248,6 @@ data/knowledge_base/neo4j/*
 src/mlirAgent/evolve/tasks/*/benchmarks/testsuite/
 src/mlirAgent/evolve/tasks/*/baseline*.json
 /src/mlirAgent/evolve/tasks/llvm_inlining/benchmarks/testsuite/
-
 
 # Evolve experiment outputs
 experiments/run_*/
